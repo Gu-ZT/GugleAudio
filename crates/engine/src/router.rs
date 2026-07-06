@@ -1,0 +1,389 @@
+use anyhow::{Context, Result};
+use rtrb::{Consumer, Producer, RingBuffer};
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
+use std::thread;
+use windows::Win32::Media::Audio::{
+    IAudioCaptureClient, IAudioClient, IAudioRenderClient,
+    IMMDeviceEnumerator, MMDeviceEnumerator, AUDCLNT_SHAREMODE_SHARED,
+    AUDCLNT_STREAMFLAGS_LOOPBACK,
+};
+use windows::Win32::System::Com::{
+    CoCreateInstance, CoUninitialize, CLSCTX_ALL,
+};
+
+use crate::com_init_best_effort;
+
+const RING_CAPACITY: usize = 48000 * 2 * 4; // 1s of stereo f32
+const QUANTUM_MS: u64 = 10;
+
+/// A route from one capture source to one render sink with a gain.
+#[derive(Clone)]
+pub struct ActiveRoute {
+    pub source_device_id: String,
+    pub sink_device_id: String,
+    pub gain: f32,
+}
+
+/// Shared routing state that can be updated from the main thread.
+pub struct RoutingTable {
+    pub routes: Vec<ActiveRoute>,
+    pub output_gains: HashMap<String, f32>,
+}
+
+/// The live audio router that manages capture/render threads.
+pub struct AudioRouter {
+    stop_flag: Arc<AtomicBool>,
+    routing: Arc<Mutex<RoutingTable>>,
+    frames_processed: Arc<AtomicU64>,
+    mixer_thread: Option<thread::JoinHandle<()>>,
+    capture_threads: Vec<thread::JoinHandle<()>>,
+    render_threads: Vec<thread::JoinHandle<()>>,
+}
+
+struct CaptureHandle {
+    device_id: String,
+    consumer: Consumer<u8>,
+}
+
+struct RenderHandle {
+    device_id: String,
+    producer: Producer<u8>,
+}
+
+impl AudioRouter {
+    /// Start the router with a set of source device IDs and sink device IDs.
+    pub fn start(
+        source_ids: Vec<String>,
+        sink_ids: Vec<String>,
+        routes: Vec<ActiveRoute>,
+        output_gains: HashMap<String, f32>,
+    ) -> Result<Self> {
+        let stop_flag = Arc::new(AtomicBool::new(false));
+        let frames_processed = Arc::new(AtomicU64::new(0));
+        let routing = Arc::new(Mutex::new(RoutingTable { routes, output_gains }));
+
+        let mut capture_consumers: Vec<CaptureHandle> = Vec::new();
+        let mut capture_threads: Vec<thread::JoinHandle<()>> = Vec::new();
+
+        // Start a capture thread for each source
+        for src_id in &source_ids {
+            let (producer, consumer) = RingBuffer::<u8>::new(RING_CAPACITY);
+            capture_consumers.push(CaptureHandle {
+                device_id: src_id.clone(),
+                consumer,
+            });
+
+            let stop = stop_flag.clone();
+            let frames = frames_processed.clone();
+            let dev_id = src_id.clone();
+            let handle = thread::Builder::new()
+                .name(format!("cap-{}", &dev_id[..8.min(dev_id.len())]))
+                .spawn(move || {
+                    if let Err(e) = run_capture(&stop, &frames, producer, &dev_id) {
+                        eprintln!("[capture {}] error: {e:#}", &dev_id[..8.min(dev_id.len())]);
+                    }
+                })
+                .context("spawn capture thread")?;
+            capture_threads.push(handle);
+        }
+
+        let mut render_producers: Vec<RenderHandle> = Vec::new();
+        let mut render_threads: Vec<thread::JoinHandle<()>> = Vec::new();
+
+        // Start a render thread for each sink
+        for sink_id in &sink_ids {
+            let (producer, consumer) = RingBuffer::<u8>::new(RING_CAPACITY);
+            render_producers.push(RenderHandle {
+                device_id: sink_id.clone(),
+                producer,
+            });
+
+            let stop = stop_flag.clone();
+            let dev_id = sink_id.clone();
+            let handle = thread::Builder::new()
+                .name(format!("ren-{}", &dev_id[..8.min(dev_id.len())]))
+                .spawn(move || {
+                    if let Err(e) = run_render(&stop, consumer, &dev_id) {
+                        eprintln!("[render {}] error: {e:#}", &dev_id[..8.min(dev_id.len())]);
+                    }
+                })
+                .context("spawn render thread")?;
+            render_threads.push(handle);
+        }
+
+        // Start mixer thread
+        let stop_mix = stop_flag.clone();
+        let routing_mix = routing.clone();
+        let mixer_thread = thread::Builder::new()
+            .name("mixer".into())
+            .spawn(move || {
+                run_mixer(&stop_mix, &routing_mix, capture_consumers, render_producers);
+            })
+            .context("spawn mixer thread")?;
+
+        Ok(Self {
+            stop_flag,
+            routing,
+            frames_processed,
+            mixer_thread: Some(mixer_thread),
+            capture_threads,
+            render_threads,
+        })
+    }
+
+    pub fn update_routes(&self, routes: Vec<ActiveRoute>, output_gains: HashMap<String, f32>) {
+        if let Ok(mut rt) = self.routing.lock() {
+            rt.routes = routes;
+            rt.output_gains = output_gains;
+        }
+    }
+
+    pub fn frames_processed(&self) -> u64 {
+        self.frames_processed.load(Ordering::Relaxed)
+    }
+
+    pub fn stop(mut self) {
+        self.stop_flag.store(true, Ordering::Relaxed);
+        if let Some(h) = self.mixer_thread.take() { let _ = h.join(); }
+        for h in self.capture_threads.drain(..) { let _ = h.join(); }
+        for h in self.render_threads.drain(..) { let _ = h.join(); }
+    }
+}
+
+impl Drop for AudioRouter {
+    fn drop(&mut self) {
+        self.stop_flag.store(true, Ordering::Relaxed);
+    }
+}
+
+// --- Mixer thread ---
+
+fn run_mixer(
+    stop: &AtomicBool,
+    routing: &Mutex<RoutingTable>,
+    mut captures: Vec<CaptureHandle>,
+    mut renders: Vec<RenderHandle>,
+) {
+    // Scratch buffers: per-source raw bytes, per-sink mixed f32 samples
+    let quantum_frames = (48000 * QUANTUM_MS / 1000) as usize; // 480 frames
+    let quantum_bytes = quantum_frames * 2 * 4; // stereo f32
+    let mut src_bufs: HashMap<String, Vec<u8>> = HashMap::new();
+    let mut sink_bufs: HashMap<String, Vec<f32>> = HashMap::new();
+
+    for cap in &captures {
+        src_bufs.insert(cap.device_id.clone(), vec![0u8; quantum_bytes]);
+    }
+    for ren in &renders {
+        sink_bufs.insert(ren.device_id.clone(), vec![0.0f32; quantum_frames * 2]);
+    }
+
+    while !stop.load(Ordering::Relaxed) {
+        thread::sleep(std::time::Duration::from_millis(QUANTUM_MS));
+
+        // Read from each capture ring
+        for cap in captures.iter_mut() {
+            let buf = src_bufs.get_mut(&cap.device_id).unwrap();
+            let avail = cap.consumer.slots();
+            let to_read = avail.min(quantum_bytes);
+            if to_read > 0 {
+                let chunk = cap.consumer.read_chunk(to_read).unwrap();
+                let (a, b) = chunk.as_slices();
+                buf[..a.len()].copy_from_slice(a);
+                buf[a.len()..a.len() + b.len()].copy_from_slice(b);
+                // Zero-pad remainder
+                for byte in buf[a.len() + b.len()..quantum_bytes].iter_mut() { *byte = 0; }
+                chunk.commit_all();
+            } else {
+                buf.fill(0);
+            }
+        }
+
+        // Clear sink buffers
+        for buf in sink_bufs.values_mut() {
+            buf.fill(0.0);
+        }
+
+        // Mix according to routing table
+        let rt = routing.lock().unwrap();
+        for route in &rt.routes {
+            let Some(src_bytes) = src_bufs.get(&route.source_device_id) else { continue };
+            let Some(sink_samples) = sink_bufs.get_mut(&route.sink_device_id) else { continue };
+
+            // Interpret source as f32 samples and mix with gain
+            let src_samples: &[f32] = unsafe {
+                std::slice::from_raw_parts(src_bytes.as_ptr() as *const f32, quantum_frames * 2)
+            };
+            let gain = route.gain;
+            for (i, sample) in src_samples.iter().enumerate() {
+                sink_samples[i] += sample * gain;
+            }
+        }
+
+        // Apply output gains and write to render rings
+        for ren in renders.iter_mut() {
+            let Some(samples) = sink_bufs.get(&ren.device_id) else { continue };
+            let output_gain = rt.output_gains.get(&ren.device_id).copied().unwrap_or(1.0);
+
+            let out_bytes: &[u8] = unsafe {
+                let gained: Vec<f32> = samples.iter().map(|s| s * output_gain).collect();
+                std::slice::from_raw_parts(gained.as_ptr() as *const u8, quantum_bytes)
+            };
+
+            let writable = ren.producer.slots();
+            let to_write = writable.min(quantum_bytes);
+            if to_write > 0 {
+                ren.producer
+                    .write_chunk_uninit(to_write)
+                    .unwrap()
+                    .fill_from_iter(out_bytes[..to_write].iter().copied());
+            }
+        }
+        drop(rt);
+    }
+}
+
+// --- Capture thread: opens a specific device by ID in loopback mode ---
+
+fn run_capture(
+    stop: &AtomicBool,
+    frames_processed: &AtomicU64,
+    mut producer: Producer<u8>,
+    device_id: &str,
+) -> Result<()> {
+    unsafe {
+        let needs_uninit = com_init_best_effort();
+
+        let result = (|| -> Result<()> {
+            let enumerator: IMMDeviceEnumerator =
+                CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL)?;
+
+            // Open specific device by ID
+            let wide_id: Vec<u16> = device_id.encode_utf16().chain(std::iter::once(0)).collect();
+            let device = enumerator.GetDevice(windows::core::PCWSTR(wide_id.as_ptr()))?;
+
+            let audio_client: IAudioClient = device.Activate(CLSCTX_ALL, None)?;
+            let mix_format = audio_client.GetMixFormat()?;
+
+            // Use loopback for render devices, normal capture for capture devices
+            let flags = AUDCLNT_STREAMFLAGS_LOOPBACK;
+            audio_client.Initialize(AUDCLNT_SHAREMODE_SHARED, flags, 10_000_000, 0, mix_format, None)?;
+
+            let capture_client: IAudioCaptureClient = audio_client.GetService()?;
+            audio_client.Start()?;
+
+            while !stop.load(Ordering::Relaxed) {
+                thread::sleep(std::time::Duration::from_millis(5));
+
+                let mut pkt = capture_client.GetNextPacketSize()?;
+                while pkt > 0 {
+                    let mut buf = std::ptr::null_mut();
+                    let mut nframes = 0u32;
+                    let mut flags_out = 0u32;
+                    capture_client.GetBuffer(&mut buf, &mut nframes, &mut flags_out, None, None)?;
+
+                    let frame_size = (*mix_format).nBlockAlign as usize;
+                    let byte_count = nframes as usize * frame_size;
+                    let data = std::slice::from_raw_parts(buf as *const u8, byte_count);
+
+                    let writable = producer.slots();
+                    let to_write = byte_count.min(writable);
+                    if to_write > 0 {
+                        producer
+                            .write_chunk_uninit(to_write)
+                            .unwrap()
+                            .fill_from_iter(data[..to_write].iter().copied());
+                    }
+
+                    frames_processed.fetch_add(nframes as u64, Ordering::Relaxed);
+                    capture_client.ReleaseBuffer(nframes)?;
+                    pkt = capture_client.GetNextPacketSize()?;
+                }
+            }
+
+            audio_client.Stop()?;
+            Ok(())
+        })();
+
+        if needs_uninit { CoUninitialize(); }
+        result
+    }
+}
+
+// --- Render thread: opens a specific device by ID ---
+
+fn run_render(stop: &AtomicBool, mut consumer: Consumer<u8>, device_id: &str) -> Result<()> {
+    unsafe {
+        let needs_uninit = com_init_best_effort();
+
+        let result = (|| -> Result<()> {
+            let enumerator: IMMDeviceEnumerator =
+                CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL)?;
+
+            let wide_id: Vec<u16> = device_id.encode_utf16().chain(std::iter::once(0)).collect();
+            let device = enumerator.GetDevice(windows::core::PCWSTR(wide_id.as_ptr()))?;
+
+            let audio_client: IAudioClient = device.Activate(CLSCTX_ALL, None)?;
+            let mix_format = audio_client.GetMixFormat()?;
+
+            audio_client.Initialize(
+                AUDCLNT_SHAREMODE_SHARED,
+                windows::Win32::Media::Audio::AUDCLNT_STREAMFLAGS_NOPERSIST,
+                10_000_000,
+                0,
+                mix_format,
+                None,
+            )?;
+
+            let buffer_size = audio_client.GetBufferSize()?;
+            let render_client: IAudioRenderClient = audio_client.GetService()?;
+            let frame_size = (*mix_format).nBlockAlign as usize;
+
+            audio_client.Start()?;
+
+            while !stop.load(Ordering::Relaxed) {
+                thread::sleep(std::time::Duration::from_millis(5));
+
+                let padding = audio_client.GetCurrentPadding()?;
+                let available_frames = buffer_size - padding;
+                if available_frames == 0 { continue; }
+
+                let available_bytes = available_frames as usize * frame_size;
+                let readable = consumer.slots();
+                let frames_to_write = if readable >= available_bytes {
+                    available_frames
+                } else {
+                    (readable / frame_size) as u32
+                };
+
+                if frames_to_write == 0 {
+                    let buffer = render_client.GetBuffer(available_frames)?;
+                    std::ptr::write_bytes(buffer, 0, available_frames as usize * frame_size);
+                    render_client.ReleaseBuffer(available_frames, 0)?;
+                    continue;
+                }
+
+                let byte_count = frames_to_write as usize * frame_size;
+                let buffer = render_client.GetBuffer(frames_to_write)?;
+                let out_slice = std::slice::from_raw_parts_mut(buffer, byte_count);
+
+                let chunk = consumer.read_chunk(byte_count).unwrap();
+                let (first, second) = chunk.as_slices();
+                out_slice[..first.len()].copy_from_slice(first);
+                if !second.is_empty() {
+                    out_slice[first.len()..first.len() + second.len()].copy_from_slice(second);
+                }
+                chunk.commit_all();
+
+                render_client.ReleaseBuffer(frames_to_write, 0)?;
+            }
+
+            audio_client.Stop()?;
+            Ok(())
+        })();
+
+        if needs_uninit { CoUninitialize(); }
+        result
+    }
+}

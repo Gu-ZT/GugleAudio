@@ -44,30 +44,28 @@ fn remove_route(state: State<'_, AppState>, source_id: String, target_id: String
 }
 
 #[tauri::command]
-fn start_engine(state: State<'_, AppState>) -> Result<EngineSnapshot, String> {
-    let mut engine = state.engine.lock().map_err(|_| "engine mutex poisoned".to_string())?;
-    engine
-        .start_loopback_session()
-        .map_err(|error| error.to_string())
+fn set_volume(state: State<'_, AppState>, key: String, gain: f32) {
+    let mut engine = state.engine.lock().expect("engine mutex poisoned");
+    engine.set_volume(key, gain);
 }
 
 #[tauri::command]
-fn stop_engine(state: State<'_, AppState>) -> Result<EngineSnapshot, String> {
-    let mut engine = state.engine.lock().map_err(|_| "engine mutex poisoned".to_string())?;
-    Ok(engine.stop_session())
+fn get_engine_snapshot(state: State<'_, AppState>) -> EngineSnapshot {
+    let engine = state.engine.lock().expect("engine mutex poisoned");
+    engine.snapshot()
 }
 
 #[tauri::command]
-fn get_engine_snapshot(state: State<'_, AppState>) -> Result<EngineSnapshot, String> {
-    let engine = state.engine.lock().map_err(|_| "engine mutex poisoned".to_string())?;
-    Ok(engine.snapshot())
-}
-
-#[tauri::command]
-fn refresh_audio_devices(state: State<'_, AppState>) -> Result<RouteGraph, String> {
-    let mut engine = state.engine.lock().map_err(|_| "engine mutex poisoned".to_string())?;
+fn refresh_audio_devices(state: State<'_, AppState>) -> RouteGraph {
+    let mut engine = state.engine.lock().expect("engine mutex poisoned");
     engine.refresh_audio_devices();
-    Ok(engine.graph().clone())
+    engine.graph().clone()
+}
+
+#[tauri::command]
+fn stop_engine(state: State<'_, AppState>) {
+    let mut engine = state.engine.lock().expect("engine mutex poisoned");
+    engine.stop_engine();
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -82,10 +80,10 @@ pub fn run() {
             validate_route_edge,
             add_route,
             remove_route,
-            start_engine,
-            stop_engine,
+            set_volume,
             get_engine_snapshot,
             refresh_audio_devices,
+            stop_engine,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -67,7 +67,10 @@ function App() {
 
   // Volume
   const vol = (key: string) => volumes[key] ?? 100;
-  const setVol = (key: string, v: number) => setVolumes((p) => ({ ...p, [key]: v }));
+  const setVol = (key: string, v: number) => {
+    setVolumes((p) => ({ ...p, [key]: v }));
+    invoke('set_volume', { key, gain: v / 100 });
+  };
 
   // Dot positions
   const dotPos = (dotId: string) => {
