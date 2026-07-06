@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use proto::{sample_graph, RouteEdge, RouteGraph, RouteValidationError};
+use proto::{NodeDirection, RouteEdge, RouteGraph, RouteNode, RouteValidationError, TransportKind};
 use serde::Serialize;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -7,8 +7,9 @@ use std::thread;
 use windows::core::PWSTR;
 use windows::Win32::Devices::FunctionDiscovery::PKEY_Device_FriendlyName;
 use windows::Win32::Media::Audio::{
-    eConsole, eRender, IAudioCaptureClient, IAudioClient, IMMDevice, IMMDeviceEnumerator,
-    MMDeviceEnumerator, AUDCLNT_SHAREMODE_SHARED, AUDCLNT_STREAMFLAGS_LOOPBACK,
+    eCapture, eConsole, eRender, IAudioCaptureClient, IAudioClient, IMMDevice,
+    IMMDeviceCollection, IMMDeviceEnumerator, MMDeviceEnumerator, AUDCLNT_SHAREMODE_SHARED,
+    AUDCLNT_STREAMFLAGS_LOOPBACK, DEVICE_STATE_ACTIVE, EDataFlow,
 };
 use windows::Win32::System::Com::{
     CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_ALL, COINIT_MULTITHREADED, STGM_READ,
@@ -50,21 +51,35 @@ pub struct EngineController {
     state: EngineState,
     default_render_device: Option<AudioDeviceInfo>,
     session: Option<LoopbackSession>,
+    all_devices: Vec<AudioDeviceInfo>,
 }
 
 impl EngineController {
     pub fn new() -> Self {
-        let default_render_device = discover_default_render_device().ok();
+        let all_devices = enumerate_all_devices().unwrap_or_default();
+        let default_render_device = all_devices
+            .iter()
+            .find(|d| d.flow == "render" && d.role == "default")
+            .or_else(|| all_devices.iter().find(|d| d.flow == "render"))
+            .cloned();
+
+        let graph = build_graph_from_devices(&all_devices);
+
         Self {
-            graph: sample_graph(),
+            graph,
             state: EngineState::Stopped,
             default_render_device,
             session: None,
+            all_devices,
         }
     }
 
     pub fn graph(&self) -> &RouteGraph {
         &self.graph
+    }
+
+    pub fn all_devices(&self) -> &[AudioDeviceInfo] {
+        &self.all_devices
     }
 
     pub fn snapshot(&self) -> EngineSnapshot {
@@ -91,7 +106,26 @@ impl EngineController {
     }
 
     pub fn refresh_audio_devices(&mut self) {
-        self.default_render_device = discover_default_render_device().ok();
+        self.all_devices = enumerate_all_devices().unwrap_or_default();
+        self.default_render_device = self
+            .all_devices
+            .iter()
+            .find(|d| d.flow == "render" && d.role == "default")
+            .or_else(|| self.all_devices.iter().find(|d| d.flow == "render"))
+            .cloned();
+        self.graph = build_graph_from_devices(&self.all_devices);
+    }
+
+    pub fn add_edge(&mut self, edge: RouteEdge) -> Result<(), RouteValidationError> {
+        self.graph.validate_edge(&edge)?;
+        if !self.graph.edges.iter().any(|e| e.source_id == edge.source_id && e.target_id == edge.target_id) {
+            self.graph.edges.push(edge);
+        }
+        Ok(())
+    }
+
+    pub fn remove_edge(&mut self, source_id: &str, target_id: &str) {
+        self.graph.edges.retain(|e| !(e.source_id == source_id && e.target_id == target_id));
     }
 
     pub fn start_loopback_session(&mut self) -> Result<EngineSnapshot> {
@@ -146,7 +180,7 @@ impl Default for EngineController {
 
 // --- WASAPI helpers ---
 
-fn discover_default_render_device() -> Result<AudioDeviceInfo> {
+fn enumerate_all_devices() -> Result<Vec<AudioDeviceInfo>> {
     unsafe {
         CoInitializeEx(None, COINIT_MULTITHREADED)
             .ok()
@@ -154,25 +188,86 @@ fn discover_default_render_device() -> Result<AudioDeviceInfo> {
 
         let result = (|| {
             let enumerator: IMMDeviceEnumerator =
-                CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL)
-                    .context("failed to create MMDeviceEnumerator")?;
-            let device = enumerator
-                .GetDefaultAudioEndpoint(eRender, eConsole)
-                .context("no default render endpoint")?;
+                CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL)?;
 
-            let id = pwstr_to_string(device.GetId()?)?;
-            let name = get_device_friendly_name(&device).unwrap_or_else(|_| id.clone());
-
-            Ok(AudioDeviceInfo {
-                id,
-                name,
-                flow: "render".into(),
-                role: "console".into(),
-            })
+            let mut devices = Vec::new();
+            enumerate_flow(&enumerator, eRender, "render", &mut devices)?;
+            enumerate_flow(&enumerator, eCapture, "capture", &mut devices)?;
+            Ok(devices)
         })();
 
         CoUninitialize();
         result
+    }
+}
+
+fn enumerate_flow(
+    enumerator: &IMMDeviceEnumerator,
+    flow: EDataFlow,
+    flow_name: &str,
+    out: &mut Vec<AudioDeviceInfo>,
+) -> Result<()> {
+    unsafe {
+        let collection: IMMDeviceCollection =
+            enumerator.EnumAudioEndpoints(flow, DEVICE_STATE_ACTIVE)?;
+        let count = collection.GetCount()?;
+
+        let default_device = enumerator
+            .GetDefaultAudioEndpoint(flow, eConsole)
+            .ok()
+            .and_then(|d| d.GetId().ok())
+            .and_then(|id| pwstr_to_string(id).ok());
+
+        for i in 0..count {
+            let device = collection.Item(i)?;
+            let id = pwstr_to_string(device.GetId()?)?;
+            let name = get_device_friendly_name(&device).unwrap_or_else(|_| id.clone());
+            let is_default = default_device.as_deref() == Some(&id);
+
+            out.push(AudioDeviceInfo {
+                id,
+                name,
+                flow: flow_name.into(),
+                role: if is_default { "default".into() } else { "normal".into() },
+            });
+        }
+    }
+    Ok(())
+}
+
+fn build_graph_from_devices(devices: &[AudioDeviceInfo]) -> RouteGraph {
+    let mut nodes: Vec<RouteNode> = devices
+        .iter()
+        .map(|d| {
+            let direction = match d.flow.as_str() {
+                "render" => NodeDirection::Input,
+                _ => NodeDirection::Output,
+            };
+            RouteNode {
+                id: format!("device-{}", d.id),
+                name: d.name.clone(),
+                transport: TransportKind::Local,
+                direction,
+            }
+        })
+        .collect();
+
+    nodes.push(RouteNode {
+        id: "network-input-stream-pc".into(),
+        name: "Network: Stream PC".into(),
+        transport: TransportKind::Network,
+        direction: NodeDirection::Input,
+    });
+    nodes.push(RouteNode {
+        id: "network-output-game-pc".into(),
+        name: "Network: Game PC".into(),
+        transport: TransportKind::Network,
+        direction: NodeDirection::Output,
+    });
+
+    RouteGraph {
+        nodes,
+        edges: vec![],
     }
 }
 
@@ -259,6 +354,7 @@ fn pwstr_to_string(value: PWSTR) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proto::sample_graph;
 
     #[test]
     fn snapshot_without_session() {
@@ -267,6 +363,7 @@ mod tests {
             state: EngineState::Stopped,
             default_render_device: None,
             session: None,
+            all_devices: vec![],
         };
         let snap = controller.snapshot();
         assert_eq!(snap.state, EngineState::Stopped);
@@ -281,6 +378,7 @@ mod tests {
             state: EngineState::Stopped,
             default_render_device: None,
             session: None,
+            all_devices: vec![],
         };
         let edge = RouteEdge {
             source_id: "network-output-game-pc".into(),
