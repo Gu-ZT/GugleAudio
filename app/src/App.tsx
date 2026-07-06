@@ -65,7 +65,7 @@ function App() {
   const availInputs = inputNodes.filter((n) => !activeInputs.includes(n.id));
   const availOutputs = outputNodes.filter((n) => !activeOutputs.includes(n.id));
 
-  // Volume helpers
+  // Volume
   const vol = (key: string) => volumes[key] ?? 100;
   const setVol = (key: string, v: number) => setVolumes((p) => ({ ...p, [key]: v }));
 
@@ -79,21 +79,25 @@ function App() {
     return { x: er.left + er.width / 2 - cr.left, y: er.top + er.height / 2 - cr.top + c.scrollTop };
   };
 
-  // Drag
+  // Drag from + button to create new connection
   const startDrag = (e: React.MouseEvent, sourceId: string) => {
     e.preventDefault();
     const c = panelsRef.current;
     if (!c) return;
     const cr = c.getBoundingClientRect();
-    const d = dotPos(`dot-out-${sourceId}`);
-    if (!d) return;
-    setDragging({ sourceId, startX: d.x, startY: d.y, curX: e.clientX - cr.left, curY: e.clientY - cr.top + c.scrollTop });
+    const el = e.currentTarget as HTMLElement;
+    const er = el.getBoundingClientRect();
+    const sx = er.left + er.width / 2 - cr.left;
+    const sy = er.top + er.height / 2 - cr.top + c.scrollTop;
+    setDragging({ sourceId, startX: sx, startY: sy, curX: e.clientX - cr.left, curY: e.clientY - cr.top + c.scrollTop });
   };
+
   const onMove = (e: React.MouseEvent) => {
     if (!dragging || !panelsRef.current) return;
     const cr = panelsRef.current.getBoundingClientRect();
     setDragging({ ...dragging, curX: e.clientX - cr.left, curY: e.clientY - cr.top + panelsRef.current.scrollTop });
   };
+
   const onUp = async (e: React.MouseEvent) => {
     if (!dragging) return;
     const el = (e.target as HTMLElement).closest('[data-input-id]');
@@ -134,14 +138,26 @@ function App() {
     loadData();
   };
 
-  // Render SVG
+  // Get color for an edge based on global edge index
+  const getEdgeColor = (sourceId: string, targetId: string) => {
+    const allEdges = graph?.edges ?? [];
+    const idx = allEdges.findIndex((e) => e.sourceId === sourceId && e.targetId === targetId);
+    return COLORS[(idx >= 0 ? idx : 0) % COLORS.length];
+  };
+
+  // SVG
   const renderSvg = () => {
     if (!graph) return null;
     const els: React.ReactNode[] = [];
-    const visible = graph.edges.filter((e) => activeInputs.includes(e.sourceId) && activeOutputs.includes(e.targetId));
+    const visible = graph.edges.filter(
+      (e) => activeInputs.includes(e.sourceId) && activeOutputs.includes(e.targetId),
+    );
+
     visible.forEach((edge, i) => {
-      const s = dotPos(`dot-out-${edge.sourceId}`);
-      const t = dotPos(`dot-in-${edge.targetId}`);
+      const dotOutId = `dot-conn-${edge.sourceId}-${edge.targetId}`;
+      const dotInId = `dot-in-${edge.targetId}`;
+      const s = dotPos(dotOutId);
+      const t = dotPos(dotInId);
       if (!s || !t) return;
       const col = COLORS[i % COLORS.length];
       const cp = Math.max(80, Math.abs(t.x - s.x) * 0.45);
@@ -151,9 +167,10 @@ function App() {
           <path d={d} stroke={col} strokeWidth={3} fill="none" opacity={0.85} />
           <circle cx={s.x} cy={s.y} r={6} fill={col} />
           <circle cx={t.x} cy={t.y} r={6} fill={col} />
-        </g>
+        </g>,
       );
     });
+
     if (dragging) {
       const cp = Math.max(60, Math.abs(dragging.curX - dragging.startX) * 0.4);
       const d = `M${dragging.startX},${dragging.startY} C${dragging.startX + cp},${dragging.startY} ${dragging.curX - cp},${dragging.curY} ${dragging.curX},${dragging.curY}`;
@@ -170,7 +187,7 @@ function App() {
       {statusMessage && <div className="toast" onClick={() => setStatusMessage('')}>{statusMessage}</div>}
 
       <div className="panels" ref={panelsRef}>
-        {/* LEFT */}
+        {/* LEFT: Inputs */}
         <div className="panel left">
           <select className="add-select" value="" onChange={(e) => { if (e.target.value) addInput(e.target.value); }}>
             <option value="" disabled>Add Input</option>
@@ -180,26 +197,41 @@ function App() {
           {activeInNodes.map((node) => {
             const conns = graph?.edges.filter((e) => e.sourceId === node.id && activeOutputs.includes(e.targetId)) ?? [];
             return (
-              <div key={node.id} className="card">
+              <div key={node.id} className="card input-card">
                 <div className="card-top">
                   <span className="card-name">{node.name}</span>
                   <button className="card-rm" onClick={() => removeInput(node.id)}>×</button>
                 </div>
+
+                {/* Per-connection rows with individual dots */}
                 {conns.map((c) => {
                   const tgt = graph?.nodes.find((n) => n.id === c.targetId);
                   const k = `${c.sourceId}>${c.targetId}`;
+                  const color = getEdgeColor(c.sourceId, c.targetId);
                   return (
-                    <div key={k} className="sub-row">
-                      <span className="sub-name">{tgt?.name}</span>
-                      <div className="vol-wrap">
-                        <div className="vol-meter" style={{ width: `${Math.random() * 50 + 10}%` }} />
-                        <input type="range" min={0} max={100} value={vol(k)} onChange={(e) => setVol(k, +e.target.value)} className="vol-slider" />
+                    <div key={k} className="conn-row">
+                      <div className="conn-info">
+                        <span className="conn-name">{tgt?.name}</span>
+                        <div className="vol-wrap">
+                          <div className="vol-meter" style={{ width: `${Math.random() * 50 + 10}%` }} />
+                          <input type="range" min={0} max={100} value={vol(k)} onChange={(e) => setVol(k, +e.target.value)} className="vol-slider" />
+                        </div>
                       </div>
+                      <div
+                        className="conn-dot"
+                        id={`dot-conn-${c.sourceId}-${c.targetId}`}
+                        style={{ borderColor: color }}
+                      />
                     </div>
                   );
                 })}
-                <div className="dot-row right">
-                  <div className="dot" id={`dot-out-${node.id}`} onMouseDown={(e) => startDrag(e, node.id)} />
+
+                {/* Add connection button (⊕) */}
+                <div className="add-conn-row">
+                  <div
+                    className="add-conn-btn"
+                    onMouseDown={(e) => startDrag(e, node.id)}
+                  >⊕</div>
                 </div>
               </div>
             );
@@ -208,7 +240,7 @@ function App() {
 
         <svg className="svg-layer">{renderSvg()}</svg>
 
-        {/* RIGHT */}
+        {/* RIGHT: Outputs */}
         <div className="panel right">
           <select className="add-select" value="" onChange={(e) => { if (e.target.value) addOutput(e.target.value); }}>
             <option value="" disabled>Add Output</option>
@@ -218,17 +250,19 @@ function App() {
           {activeOutNodes.map((node) => {
             const k = `out-${node.id}`;
             return (
-              <div key={node.id} className="card out-card" data-input-id={node.id}>
-                <div className="dot-row left-dot">
-                  <div className="dot" id={`dot-in-${node.id}`} data-input-id={node.id} />
+              <div key={node.id} className="card output-card" data-input-id={node.id}>
+                <div className="out-dot-area" data-input-id={node.id}>
+                  <div className="conn-dot out-dot" id={`dot-in-${node.id}`} data-input-id={node.id} />
                 </div>
-                <div className="card-top">
-                  <span className="card-name">{node.name}</span>
-                  <button className="card-rm" onClick={() => removeOutput(node.id)}>×</button>
-                </div>
-                <div className="vol-wrap">
-                  <div className="vol-meter" style={{ width: `${Math.random() * 50 + 10}%` }} />
-                  <input type="range" min={0} max={100} value={vol(k)} onChange={(e) => setVol(k, +e.target.value)} className="vol-slider" />
+                <div className="out-content">
+                  <div className="card-top">
+                    <span className="card-name">{node.name}</span>
+                    <button className="card-rm" onClick={() => removeOutput(node.id)}>×</button>
+                  </div>
+                  <div className="vol-wrap">
+                    <div className="vol-meter" style={{ width: `${Math.random() * 50 + 10}%` }} />
+                    <input type="range" min={0} max={100} value={vol(k)} onChange={(e) => setVol(k, +e.target.value)} className="vol-slider" />
+                  </div>
                 </div>
               </div>
             );

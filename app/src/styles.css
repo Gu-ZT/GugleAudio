@@ -15,25 +15,23 @@ body {
   flex-direction: column;
 }
 
-/* Header */
 .hdr {
-  padding: 12px 20px;
+  padding: 10px 20px;
   border-bottom: 1px solid #1e2433;
   background: #111318;
   z-index: 10;
 }
 .hdr-title {
   margin: 0;
-  font-size: 18px;
+  font-size: 16px;
   font-weight: 700;
   background: linear-gradient(135deg, #a78bfa, #06b6d4);
   -webkit-background-clip: text;
   -webkit-text-fill-color: transparent;
 }
 
-/* Toast */
 .toast {
-  padding: 6px 20px;
+  padding: 5px 20px;
   background: #7c2d12;
   color: #fef2f2;
   font-size: 12px;
@@ -47,7 +45,7 @@ body {
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: 0;
-  padding: 16px 12px;
+  padding: 14px 10px;
   position: relative;
   overflow-y: auto;
   overflow-x: hidden;
@@ -57,13 +55,13 @@ body {
   flex-direction: column;
   gap: 8px;
 }
-.panel.left { padding-right: 50px; }
-.panel.right { padding-left: 50px; }
+.panel.left { padding-right: 44px; }
+.panel.right { padding-left: 44px; }
 
-/* Add device select */
+/* Add select */
 .add-select {
   width: 100%;
-  padding: 10px 14px;
+  padding: 9px 12px;
   border-radius: 8px;
   border: 1px solid #2a3344;
   background: #1a1f2a;
@@ -74,15 +72,15 @@ body {
 }
 .add-select:focus { outline: 1px solid #475569; }
 
-/* Card */
+/* Card base */
 .card {
   background: #1a1f2a;
   border: 1px solid #252d3a;
   border-radius: 10px;
-  padding: 12px 14px;
+  padding: 10px 12px;
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 6px;
   position: relative;
 }
 .card:hover { border-color: #334155; }
@@ -91,7 +89,7 @@ body {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 8px;
+  gap: 6px;
 }
 .card-name {
   font-size: 13px;
@@ -104,34 +102,106 @@ body {
   background: none;
   border: none;
   color: #64748b;
-  font-size: 18px;
+  font-size: 16px;
   cursor: pointer;
-  padding: 0 4px;
+  padding: 0 3px;
   line-height: 1;
+  flex-shrink: 0;
 }
 .card-rm:hover { color: #f43f5e; }
 
-/* Sub-row (per-connection volume in input card) */
-.sub-row {
+/* Input card: connection rows */
+.input-card {
+  padding-right: 8px;
+}
+
+.conn-row {
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 4px 0;
+  gap: 6px;
+  padding: 3px 0;
   border-top: 1px solid #1e2838;
 }
-.sub-name {
+.conn-info {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+.conn-name {
   font-size: 11px;
   color: #94a3b8;
-  min-width: 60px;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
 
+/* Connection dot (per-connection, on card edge) */
+.conn-dot {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  border: 2.5px solid #475569;
+  background: #1e293b;
+  flex-shrink: 0;
+  position: relative;
+}
+
+/* Add connection button */
+.add-conn-row {
+  display: flex;
+  justify-content: flex-end;
+  padding-top: 2px;
+}
+.add-conn-btn {
+  width: 20px;
+  height: 20px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  border: 1.5px solid #475569;
+  background: #1e293b;
+  color: #94a3b8;
+  font-size: 14px;
+  cursor: crosshair;
+  transition: border-color 0.12s, transform 0.12s;
+}
+.add-conn-btn:hover {
+  border-color: #a78bfa;
+  color: #a78bfa;
+  transform: scale(1.2);
+}
+
+/* Output card */
+.output-card {
+  flex-direction: row;
+  align-items: stretch;
+  gap: 0;
+  padding: 0;
+}
+.out-dot-area {
+  display: flex;
+  align-items: center;
+  padding: 0 8px;
+  flex-shrink: 0;
+}
+.out-dot {
+  border-color: #475569;
+}
+.out-content {
+  flex: 1;
+  padding: 10px 12px 10px 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+
 /* Volume */
 .vol-wrap {
-  flex: 1;
-  height: 20px;
+  height: 18px;
   position: relative;
   display: flex;
   align-items: center;
@@ -141,15 +211,15 @@ body {
   left: 0;
   top: 50%;
   transform: translateY(-50%);
-  height: 4px;
+  height: 3px;
   background: #1d6cb0;
   border-radius: 2px;
   pointer-events: none;
-  transition: width 0.1s;
+  transition: width 0.08s linear;
 }
 .vol-slider {
   width: 100%;
-  height: 4px;
+  height: 3px;
   appearance: none;
   background: #2a3344;
   border-radius: 2px;
@@ -160,45 +230,12 @@ body {
 }
 .vol-slider::-webkit-slider-thumb {
   appearance: none;
-  width: 12px;
-  height: 12px;
+  width: 10px;
+  height: 10px;
   border-radius: 50%;
   background: #e2e8f0;
   border: 2px solid #475569;
   cursor: pointer;
-}
-
-.output-volume { margin-top: 4px; }
-
-/* Dots */
-.dot-row {
-  display: flex;
-  justify-content: flex-end;
-  padding-top: 4px;
-}
-.dot-row.right { justify-content: flex-end; }
-.dot-row.left-dot { justify-content: flex-start; }
-
-.dot {
-  width: 14px;
-  height: 14px;
-  border-radius: 50%;
-  border: 2px solid #475569;
-  background: #1e293b;
-  cursor: crosshair;
-  transition: transform 0.12s, border-color 0.12s;
-  flex-shrink: 0;
-}
-.dot:hover {
-  border-color: #a78bfa;
-  transform: scale(1.4);
-}
-
-/* Output card layout */
-.out-card {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
 }
 
 /* SVG */
