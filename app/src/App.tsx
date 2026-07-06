@@ -225,6 +225,12 @@ function App() {
                   <button className="card-rm" onClick={() => removeInput(node.id)}>×</button>
                 </div>
 
+                {/* Default input level meter (always visible) */}
+                <div className="vol-wrap input-meter">
+                  <div className="vol-meter" style={{ width: `${getPeak(node.id)}%` }} />
+                  <div className="vol-track" />
+                </div>
+
                 {/* Per-connection rows with individual dots */}
                 {conns.map((c) => {
                   const tgt = graph?.nodes.find((n) => n.id === c.targetId);

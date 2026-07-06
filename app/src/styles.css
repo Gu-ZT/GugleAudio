@@ -137,6 +137,22 @@ body {
   text-overflow: ellipsis;
 }
 
+/* Input level meter (always visible, read-only) */
+.input-meter {
+  height: 6px;
+  margin: 2px 0 4px;
+}
+.input-meter .vol-meter {
+  height: 4px;
+  border-radius: 2px;
+}
+.vol-track {
+  width: 100%;
+  height: 3px;
+  background: #1e2838;
+  border-radius: 2px;
+}
+
 /* Connection dot (per-connection, on card edge) */
 .conn-dot {
   width: 12px;
