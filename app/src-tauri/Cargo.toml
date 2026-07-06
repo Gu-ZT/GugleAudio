@@ -10,7 +10,7 @@ name = "gugleaudio_app_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]
-tauri-build = { version = "2" }
+tauri-build = { version = "2", features = [] }
 
 [dependencies]
 engine = { path = "../../crates/engine" }
