@@ -144,17 +144,22 @@ impl EngineController {
         }
 
         // Collect unique source and sink device IDs from edges
-        // source nodes in graph have direction=Output, their id is "device-{wasapi_id}"
-        let mut source_ids: Vec<String> = Vec::new();
+        // source nodes: direction=Output in proto -> capture devices (flow="capture") or render devices (loopback)
+        let mut source_ids: Vec<(String, bool)> = Vec::new(); // (device_id, is_loopback)
         let mut sink_ids: Vec<String> = Vec::new();
 
         for edge in &self.graph.edges {
-            let src_dev = self.node_to_device_id(&edge.source_id);
-            let tgt_dev = self.node_to_device_id(&edge.target_id);
-            if let Some(s) = src_dev {
-                if !source_ids.contains(&s) { source_ids.push(s); }
+            if let Some(s) = self.node_to_device_id(&edge.source_id) {
+                if !source_ids.iter().any(|(id, _)| id == &s) {
+                    // If device is a capture device (microphone etc) -> normal capture
+                    // If device is a render device (speakers etc) -> loopback capture (grab desktop audio)
+                    let is_capture_device = self.all_devices.iter()
+                        .any(|d| d.id == s && d.flow == "capture");
+                    let is_loopback = !is_capture_device;
+                    source_ids.push((s, is_loopback));
+                }
             }
-            if let Some(t) = tgt_dev {
+            if let Some(t) = self.node_to_device_id(&edge.target_id) {
                 if !sink_ids.contains(&t) { sink_ids.push(t); }
             }
         }
