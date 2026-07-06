@@ -15,8 +15,7 @@ use windows::Win32::System::Com::{
 
 use crate::com_init_best_effort;
 
-const RING_CAPACITY: usize = 48000 * 8 * 4 / 10; // ~100ms of 8ch 32-bit
-const QUANTUM_MS: u64 = 5;
+const RING_CAPACITY: usize = 48000 * 8 * 4 / 5; // ~200ms of 8ch 32-bit
 
 /// A route from one capture source to one render sink with a gain.
 #[derive(Clone)]
@@ -176,64 +175,52 @@ fn run_mixer(
     mut captures: Vec<CaptureHandle>,
     mut renders: Vec<RenderHandle>,
 ) {
-    let quantum_bytes = 4800;
-    let mut src_bufs: HashMap<String, Vec<u8>> = HashMap::new();
-
-    for cap in &captures {
-        src_bufs.insert(cap.device_id.clone(), vec![0u8; quantum_bytes]);
-    }
+    let mut tmp_buf: Vec<u8> = vec![0u8; RING_CAPACITY];
 
     while !stop.load(Ordering::Relaxed) {
-        thread::sleep(std::time::Duration::from_millis(QUANTUM_MS));
+        thread::sleep(std::time::Duration::from_millis(2));
 
-        // Read from each capture ring
-        for cap in captures.iter_mut() {
-            let buf = src_bufs.get_mut(&cap.device_id).unwrap();
-            let avail = cap.consumer.slots();
-            let to_read = avail.min(quantum_bytes);
-            if to_read > 0 {
-                let chunk = cap.consumer.read_chunk(to_read).unwrap();
-                let (a, b) = chunk.as_slices();
-                buf[..a.len()].copy_from_slice(a);
-                if !b.is_empty() {
-                    buf[a.len()..a.len() + b.len()].copy_from_slice(b);
-                }
-                let total = a.len() + b.len();
-                for byte in buf[total..quantum_bytes].iter_mut() { *byte = 0; }
-                chunk.commit_all();
-            } else {
-                buf.fill(0);
-            }
-        }
-
-        // Compute peaks per source (interpret as f32 samples)
-        let mut new_peaks: HashMap<String, f32> = HashMap::new();
-        for (id, buf) in &src_bufs {
-            let samples = unsafe {
-                std::slice::from_raw_parts(buf.as_ptr() as *const f32, buf.len() / 4)
-            };
-            let peak = samples.iter().fold(0.0f32, |max, &s| max.max(s.abs()));
-            new_peaks.insert(id.clone(), peak.min(1.0));
-        }
-        if let Ok(mut p) = peaks.lock() {
-            *p = new_peaks;
-        }
-
-        // Route: for each active route, write source bytes to the corresponding sink's ring
         let rt = routing.lock().unwrap();
-        for route in &rt.routes {
-            let Some(src_bytes) = src_bufs.get(&route.source_device_id) else { continue };
-            let Some(ren) = renders.iter_mut().find(|r| r.device_id == route.sink_device_id) else { continue };
 
-            let writable = ren.producer.slots();
-            let to_write = quantum_bytes.min(writable);
-            if to_write > 0 {
-                ren.producer
-                    .write_chunk_uninit(to_write)
-                    .unwrap()
-                    .fill_from_iter(src_bytes[..to_write].iter().copied());
+        for cap in captures.iter_mut() {
+            let avail = cap.consumer.slots();
+            if avail == 0 { continue; }
+
+            let to_read = avail.min(tmp_buf.len());
+            let chunk = cap.consumer.read_chunk(to_read).unwrap();
+            let (a, b) = chunk.as_slices();
+            tmp_buf[..a.len()].copy_from_slice(a);
+            if !b.is_empty() {
+                tmp_buf[a.len()..a.len() + b.len()].copy_from_slice(b);
+            }
+            let total = a.len() + b.len();
+            chunk.commit_all();
+
+            // Compute peak
+            let samples = unsafe {
+                std::slice::from_raw_parts(tmp_buf.as_ptr() as *const f32, total / 4)
+            };
+            let peak = samples.iter().fold(0.0f32, |mx, &s| mx.max(s.abs())).min(1.0);
+            if let Ok(mut p) = peaks.lock() {
+                p.insert(cap.device_id.clone(), peak);
+            }
+
+            // Write to all sinks routed from this source
+            for route in &rt.routes {
+                if route.source_device_id != cap.device_id { continue; }
+                let Some(ren) = renders.iter_mut().find(|r| r.device_id == route.sink_device_id) else { continue };
+
+                let writable = ren.producer.slots();
+                let to_write = total.min(writable);
+                if to_write > 0 {
+                    ren.producer
+                        .write_chunk_uninit(to_write)
+                        .unwrap()
+                        .fill_from_iter(tmp_buf[..to_write].iter().copied());
+                }
             }
         }
+
         drop(rt);
     }
 }
@@ -352,26 +339,19 @@ fn run_render(stop: &AtomicBool, mut consumer: Consumer<u8>, device_id: &str) ->
                 &device_id[..8.min(device_id.len())], ch, bits, rate);
 
             while !stop.load(Ordering::Relaxed) {
-                thread::sleep(std::time::Duration::from_millis(5));
+                thread::sleep(std::time::Duration::from_millis(2));
 
                 let padding = audio_client.GetCurrentPadding()?;
                 let available_frames = buffer_size - padding;
                 if available_frames == 0 { continue; }
 
-                let available_bytes = available_frames as usize * frame_size;
                 let readable = consumer.slots();
-                let frames_to_write = if readable >= available_bytes {
-                    available_frames
-                } else {
-                    (readable / frame_size) as u32
-                };
+                if readable == 0 { continue; }
 
-                if frames_to_write == 0 {
-                    let buffer = render_client.GetBuffer(available_frames)?;
-                    std::ptr::write_bytes(buffer, 0, available_frames as usize * frame_size);
-                    render_client.ReleaseBuffer(available_frames, 0)?;
-                    continue;
-                }
+                // Write as many complete frames as we have data for (up to available space)
+                let available_bytes = available_frames as usize * frame_size;
+                let frames_to_write = (readable.min(available_bytes) / frame_size) as u32;
+                if frames_to_write == 0 { continue; }
 
                 let byte_count = frames_to_write as usize * frame_size;
                 let buffer = render_client.GetBuffer(frames_to_write)?;
