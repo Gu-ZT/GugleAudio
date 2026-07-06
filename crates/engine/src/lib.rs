@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use proto::{NodeDirection, RouteEdge, RouteGraph, RouteNode, RouteValidationError, TransportKind};
+use rtrb::RingBuffer;
 use serde::Serialize;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -7,7 +8,7 @@ use std::thread;
 use windows::core::PWSTR;
 use windows::Win32::Devices::FunctionDiscovery::PKEY_Device_FriendlyName;
 use windows::Win32::Media::Audio::{
-    eCapture, eConsole, eRender, IAudioCaptureClient, IAudioClient, IMMDevice,
+    eCapture, eConsole, eRender, IAudioCaptureClient, IAudioClient, IAudioRenderClient, IMMDevice,
     IMMDeviceCollection, IMMDeviceEnumerator, MMDeviceEnumerator, AUDCLNT_SHAREMODE_SHARED,
     AUDCLNT_STREAMFLAGS_LOOPBACK, DEVICE_STATE_ACTIVE, EDataFlow,
 };
@@ -40,17 +41,18 @@ pub struct EngineSnapshot {
     pub default_render_device: Option<AudioDeviceInfo>,
 }
 
-struct LoopbackSession {
+struct PassthroughSession {
     stop_flag: Arc<AtomicBool>,
-    frames_captured: Arc<AtomicU64>,
-    thread_handle: Option<thread::JoinHandle<()>>,
+    frames_processed: Arc<AtomicU64>,
+    capture_thread: Option<thread::JoinHandle<()>>,
+    render_thread: Option<thread::JoinHandle<()>>,
 }
 
 pub struct EngineController {
     graph: RouteGraph,
     state: EngineState,
     default_render_device: Option<AudioDeviceInfo>,
-    session: Option<LoopbackSession>,
+    session: Option<PassthroughSession>,
     all_devices: Vec<AudioDeviceInfo>,
 }
 
@@ -86,13 +88,13 @@ impl EngineController {
         let processed_frames = self
             .session
             .as_ref()
-            .map(|s| s.frames_captured.load(Ordering::Relaxed))
+            .map(|s| s.frames_processed.load(Ordering::Relaxed))
             .unwrap_or(0);
 
         EngineSnapshot {
             state: self.state,
             active_session: if self.session.is_some() {
-                Some("loopback-capture".into())
+                Some("loopback-passthrough".into())
             } else {
                 None
             },
@@ -113,7 +115,16 @@ impl EngineController {
             .find(|d| d.flow == "render" && d.role == "default")
             .or_else(|| self.all_devices.iter().find(|d| d.flow == "render"))
             .cloned();
+
+        let old_edges = std::mem::take(&mut self.graph.edges);
         self.graph = build_graph_from_devices(&self.all_devices);
+
+        // Retain edges whose nodes still exist in the new graph
+        for edge in old_edges {
+            if self.graph.validate_edge(&edge).is_ok() {
+                self.graph.edges.push(edge);
+            }
+        }
     }
 
     pub fn add_edge(&mut self, edge: RouteEdge) -> Result<(), RouteValidationError> {
@@ -137,24 +148,38 @@ impl EngineController {
         self.state = EngineState::Starting;
 
         let stop_flag = Arc::new(AtomicBool::new(false));
-        let frames_captured = Arc::new(AtomicU64::new(0));
+        let frames_processed = Arc::new(AtomicU64::new(0));
 
-        let stop = stop_flag.clone();
-        let frames = frames_captured.clone();
+        // Ring buffer: 48000 samples * 2 channels * 4 bytes (f32) * 1 second capacity
+        let ring_capacity = 48000 * 2 * 4;
+        let (producer, consumer) = RingBuffer::<u8>::new(ring_capacity);
 
-        let thread_handle = thread::Builder::new()
-            .name("loopback-capture".into())
+        let stop_cap = stop_flag.clone();
+        let frames_cap = frames_processed.clone();
+        let capture_thread = thread::Builder::new()
+            .name("capture".into())
             .spawn(move || {
-                if let Err(e) = loopback_capture_thread(&stop, &frames) {
-                    eprintln!("[loopback-capture] error: {e:#}");
+                if let Err(e) = capture_thread_fn(&stop_cap, &frames_cap, producer) {
+                    eprintln!("[capture] error: {e:#}");
                 }
             })
-            .context("failed to spawn loopback capture thread")?;
+            .context("failed to spawn capture thread")?;
 
-        self.session = Some(LoopbackSession {
+        let stop_ren = stop_flag.clone();
+        let render_thread = thread::Builder::new()
+            .name("render".into())
+            .spawn(move || {
+                if let Err(e) = render_thread_fn(&stop_ren, consumer) {
+                    eprintln!("[render] error: {e:#}");
+                }
+            })
+            .context("failed to spawn render thread")?;
+
+        self.session = Some(PassthroughSession {
             stop_flag,
-            frames_captured,
-            thread_handle: Some(thread_handle),
+            frames_processed,
+            capture_thread: Some(capture_thread),
+            render_thread: Some(render_thread),
         });
         self.state = EngineState::Running;
         Ok(self.snapshot())
@@ -163,7 +188,10 @@ impl EngineController {
     pub fn stop_session(&mut self) -> EngineSnapshot {
         if let Some(mut session) = self.session.take() {
             session.stop_flag.store(true, Ordering::Relaxed);
-            if let Some(handle) = session.thread_handle.take() {
+            if let Some(handle) = session.capture_thread.take() {
+                let _ = handle.join();
+            }
+            if let Some(handle) = session.render_thread.take() {
                 let _ = handle.join();
             }
         }
@@ -182,9 +210,11 @@ impl Default for EngineController {
 
 fn enumerate_all_devices() -> Result<Vec<AudioDeviceInfo>> {
     unsafe {
-        CoInitializeEx(None, COINIT_MULTITHREADED)
-            .ok()
-            .context("CoInitializeEx failed")?;
+        let hr = CoInitializeEx(None, COINIT_MULTITHREADED);
+        // S_OK or S_FALSE (already initialized) are both fine
+        if hr.is_err() {
+            hr.ok().context("CoInitializeEx failed")?;
+        }
 
         let result = (|| {
             let enumerator: IMMDeviceEnumerator =
@@ -287,31 +317,40 @@ fn get_device_friendly_name(device: &IMMDevice) -> Result<String> {
     }
 }
 
-fn loopback_capture_thread(stop: &AtomicBool, frames_captured: &AtomicU64) -> Result<()> {
+fn capture_thread_fn(
+    stop: &AtomicBool,
+    frames_processed: &AtomicU64,
+    mut producer: rtrb::Producer<u8>,
+) -> Result<()> {
     unsafe {
-        CoInitializeEx(None, COINIT_MULTITHREADED)
-            .ok()
-            .context("CoInitializeEx failed in capture thread")?;
+        let hr = CoInitializeEx(None, COINIT_MULTITHREADED);
+        if hr.is_err() {
+            hr.ok().context("CoInitializeEx failed in capture thread")?;
+        }
 
-        let result = run_loopback_capture(stop, frames_captured);
+        let result = run_capture_loop(stop, frames_processed, &mut producer);
         CoUninitialize();
         result
     }
 }
 
-fn run_loopback_capture(stop: &AtomicBool, frames_captured: &AtomicU64) -> Result<()> {
+fn run_capture_loop(
+    stop: &AtomicBool,
+    frames_processed: &AtomicU64,
+    producer: &mut rtrb::Producer<u8>,
+) -> Result<()> {
     unsafe {
         let enumerator: IMMDeviceEnumerator =
             CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL)?;
         let device = enumerator.GetDefaultAudioEndpoint(eRender, eConsole)?;
 
         let audio_client: IAudioClient = device.Activate(CLSCTX_ALL, None)?;
-
         let mix_format = audio_client.GetMixFormat()?;
+
         audio_client.Initialize(
             AUDCLNT_SHAREMODE_SHARED,
             AUDCLNT_STREAMFLAGS_LOOPBACK,
-            10_000_000, // 1 second buffer (100ns units)
+            10_000_000,
             0,
             mix_format,
             None,
@@ -321,25 +360,115 @@ fn run_loopback_capture(stop: &AtomicBool, frames_captured: &AtomicU64) -> Resul
         audio_client.Start()?;
 
         while !stop.load(Ordering::Relaxed) {
-            thread::sleep(std::time::Duration::from_millis(10));
+            thread::sleep(std::time::Duration::from_millis(5));
 
             let mut packet_length = capture_client.GetNextPacketSize()?;
             while packet_length > 0 {
                 let mut buffer = std::ptr::null_mut();
                 let mut num_frames = 0u32;
                 let mut flags = 0u32;
-                capture_client.GetBuffer(
-                    &mut buffer,
-                    &mut num_frames,
-                    &mut flags,
-                    None,
-                    None,
-                )?;
+                capture_client.GetBuffer(&mut buffer, &mut num_frames, &mut flags, None, None)?;
 
-                frames_captured.fetch_add(num_frames as u64, Ordering::Relaxed);
+                let frame_size = (*mix_format).nBlockAlign as usize;
+                let byte_count = num_frames as usize * frame_size;
+                let data = std::slice::from_raw_parts(buffer as *const u8, byte_count);
+
+                // Write as much as fits into the ring; drop excess to avoid blocking
+                let writable = producer.slots();
+                let to_write = byte_count.min(writable);
+                if to_write > 0 {
+                    producer.write_chunk_uninit(to_write).unwrap().fill_from_iter(
+                        data[..to_write].iter().copied(),
+                    );
+                }
+
+                frames_processed.fetch_add(num_frames as u64, Ordering::Relaxed);
                 capture_client.ReleaseBuffer(num_frames)?;
                 packet_length = capture_client.GetNextPacketSize()?;
             }
+        }
+
+        audio_client.Stop()?;
+    }
+    Ok(())
+}
+
+fn render_thread_fn(stop: &AtomicBool, mut consumer: rtrb::Consumer<u8>) -> Result<()> {
+    unsafe {
+        let hr = CoInitializeEx(None, COINIT_MULTITHREADED);
+        if hr.is_err() {
+            hr.ok().context("CoInitializeEx failed in render thread")?;
+        }
+
+        let result = run_render_loop(stop, &mut consumer);
+        CoUninitialize();
+        result
+    }
+}
+
+fn run_render_loop(stop: &AtomicBool, consumer: &mut rtrb::Consumer<u8>) -> Result<()> {
+    unsafe {
+        let enumerator: IMMDeviceEnumerator =
+            CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL)?;
+        // Render to default output device
+        let device = enumerator.GetDefaultAudioEndpoint(eRender, eConsole)?;
+
+        let audio_client: IAudioClient = device.Activate(CLSCTX_ALL, None)?;
+        let mix_format = audio_client.GetMixFormat()?;
+
+        audio_client.Initialize(
+            AUDCLNT_SHAREMODE_SHARED,
+            windows::Win32::Media::Audio::AUDCLNT_STREAMFLAGS_NOPERSIST,
+            10_000_000,
+            0,
+            mix_format,
+            None,
+        )?;
+
+        let buffer_size = audio_client.GetBufferSize()?;
+        let render_client: IAudioRenderClient = audio_client.GetService()?;
+        let frame_size = (*mix_format).nBlockAlign as usize;
+
+        audio_client.Start()?;
+
+        while !stop.load(Ordering::Relaxed) {
+            thread::sleep(std::time::Duration::from_millis(5));
+
+            let padding = audio_client.GetCurrentPadding()?;
+            let available_frames = buffer_size - padding;
+            if available_frames == 0 {
+                continue;
+            }
+
+            let available_bytes = available_frames as usize * frame_size;
+            let readable = consumer.slots();
+            let frames_to_write = if readable >= available_bytes {
+                available_frames
+            } else {
+                (readable / frame_size) as u32
+            };
+
+            if frames_to_write == 0 {
+                // Write silence to keep the stream alive
+                let buffer = render_client.GetBuffer(available_frames)?;
+                std::ptr::write_bytes(buffer, 0, available_frames as usize * frame_size);
+                render_client.ReleaseBuffer(available_frames, 0)?;
+                continue;
+            }
+
+            let byte_count = frames_to_write as usize * frame_size;
+            let buffer = render_client.GetBuffer(frames_to_write)?;
+            let out_slice = std::slice::from_raw_parts_mut(buffer, byte_count);
+
+            let chunk = consumer.read_chunk(byte_count).unwrap();
+            let (first, second) = chunk.as_slices();
+            out_slice[..first.len()].copy_from_slice(first);
+            if !second.is_empty() {
+                out_slice[first.len()..first.len() + second.len()].copy_from_slice(second);
+            }
+            chunk.commit_all();
+
+            render_client.ReleaseBuffer(frames_to_write, 0)?;
         }
 
         audio_client.Stop()?;

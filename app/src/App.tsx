@@ -30,7 +30,7 @@ type RouteNode = {
 
 type RouteGraph = {
   nodes: RouteNode[];
-  edges: { source_id: string; target_id: string }[];
+  edges: { sourceId: string; targetId: string }[];
 };
 
 // --- Custom node component ---
@@ -115,11 +115,11 @@ function buildFlowNodes(routeNodes: RouteNode[]): Node[] {
   return flowNodes;
 }
 
-function buildFlowEdges(routeEdges: { source_id: string; target_id: string }[]): Edge[] {
+function buildFlowEdges(routeEdges: { sourceId: string; targetId: string }[]): Edge[] {
   return routeEdges.map((e, i) => ({
     id: `edge-${i}`,
-    source: e.source_id,
-    target: e.target_id,
+    source: e.sourceId,
+    target: e.targetId,
     animated: true,
     style: { stroke: '#64748b', strokeWidth: 2 },
   }));

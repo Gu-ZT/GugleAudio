@@ -25,6 +25,7 @@ pub struct RouteNode {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct RouteEdge {
     pub source_id: String,
     pub target_id: String,

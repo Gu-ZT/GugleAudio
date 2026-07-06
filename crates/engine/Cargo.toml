@@ -6,5 +6,6 @@ edition = "2024"
 [dependencies]
 anyhow = { workspace = true }
 proto = { path = "../proto" }
+rtrb = { workspace = true }
 serde = { workspace = true }
 windows = { workspace = true }
