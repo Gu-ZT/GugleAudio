@@ -15,8 +15,8 @@ use windows::Win32::System::Com::{
 
 use crate::com_init_best_effort;
 
-const RING_CAPACITY: usize = 48000 * 2 * 4; // 1s of stereo f32
-const QUANTUM_MS: u64 = 10;
+const RING_CAPACITY: usize = 48000 * 8 * 4 / 10; // ~100ms of 8ch 32-bit
+const QUANTUM_MS: u64 = 5;
 
 /// A route from one capture source to one render sink with a gain.
 #[derive(Clone)]
@@ -36,6 +36,7 @@ pub struct RoutingTable {
 pub struct AudioRouter {
     stop_flag: Arc<AtomicBool>,
     routing: Arc<Mutex<RoutingTable>>,
+    peaks: Arc<Mutex<HashMap<String, f32>>>,
     frames_processed: Arc<AtomicU64>,
     mixer_thread: Option<thread::JoinHandle<()>>,
     capture_threads: Vec<thread::JoinHandle<()>>,
@@ -63,6 +64,7 @@ impl AudioRouter {
         let stop_flag = Arc::new(AtomicBool::new(false));
         let frames_processed = Arc::new(AtomicU64::new(0));
         let routing = Arc::new(Mutex::new(RoutingTable { routes, output_gains }));
+        let peaks = Arc::new(Mutex::new(HashMap::new()));
 
         let mut capture_consumers: Vec<CaptureHandle> = Vec::new();
         let mut capture_threads: Vec<thread::JoinHandle<()>> = Vec::new();
@@ -117,16 +119,18 @@ impl AudioRouter {
         // Start mixer thread
         let stop_mix = stop_flag.clone();
         let routing_mix = routing.clone();
+        let peaks_mix = peaks.clone();
         let mixer_thread = thread::Builder::new()
             .name("mixer".into())
             .spawn(move || {
-                run_mixer(&stop_mix, &routing_mix, capture_consumers, render_producers);
+                run_mixer(&stop_mix, &routing_mix, &peaks_mix, capture_consumers, render_producers);
             })
             .context("spawn mixer thread")?;
 
         Ok(Self {
             stop_flag,
             routing,
+            peaks,
             frames_processed,
             mixer_thread: Some(mixer_thread),
             capture_threads,
@@ -143,6 +147,10 @@ impl AudioRouter {
 
     pub fn frames_processed(&self) -> u64 {
         self.frames_processed.load(Ordering::Relaxed)
+    }
+
+    pub fn get_peaks(&self) -> HashMap<String, f32> {
+        self.peaks.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
     pub fn stop(mut self) {
@@ -164,10 +172,11 @@ impl Drop for AudioRouter {
 fn run_mixer(
     stop: &AtomicBool,
     routing: &Mutex<RoutingTable>,
+    peaks: &Mutex<HashMap<String, f32>>,
     mut captures: Vec<CaptureHandle>,
     mut renders: Vec<RenderHandle>,
 ) {
-    let quantum_bytes = 4800; // ~2.5ms at 48k stereo 16-bit, or ~1.25ms at 48k stereo 32-bit
+    let quantum_bytes = 4800;
     let mut src_bufs: HashMap<String, Vec<u8>> = HashMap::new();
 
     for cap in &captures {
@@ -197,15 +206,25 @@ fn run_mixer(
             }
         }
 
+        // Compute peaks per source (interpret as f32 samples)
+        let mut new_peaks: HashMap<String, f32> = HashMap::new();
+        for (id, buf) in &src_bufs {
+            let samples = unsafe {
+                std::slice::from_raw_parts(buf.as_ptr() as *const f32, buf.len() / 4)
+            };
+            let peak = samples.iter().fold(0.0f32, |max, &s| max.max(s.abs()));
+            new_peaks.insert(id.clone(), peak.min(1.0));
+        }
+        if let Ok(mut p) = peaks.lock() {
+            *p = new_peaks;
+        }
+
         // Route: for each active route, write source bytes to the corresponding sink's ring
         let rt = routing.lock().unwrap();
         for route in &rt.routes {
             let Some(src_bytes) = src_bufs.get(&route.source_device_id) else { continue };
             let Some(ren) = renders.iter_mut().find(|r| r.device_id == route.sink_device_id) else { continue };
 
-            // Direct byte copy (passthrough) - gain applied as simple scaling on bytes is lossy,
-            // but for gain=1.0 this is perfect. For other gains we'd need format knowledge.
-            // For now: just write raw bytes through.
             let writable = ren.producer.slots();
             let to_write = quantum_bytes.min(writable);
             if to_write > 0 {
@@ -246,7 +265,7 @@ fn run_capture(
             } else {
                 AUDCLNT_STREAMFLAGS_LOOPBACK & !AUDCLNT_STREAMFLAGS_LOOPBACK // 0
             };
-            audio_client.Initialize(AUDCLNT_SHAREMODE_SHARED, flags, 10_000_000, 0, mix_format, None)?;
+            audio_client.Initialize(AUDCLNT_SHAREMODE_SHARED, flags, 200_000, 0, mix_format, None)?;
 
             let capture_client: IAudioCaptureClient = audio_client.GetService()?;
             audio_client.Start()?;
@@ -314,7 +333,7 @@ fn run_render(stop: &AtomicBool, mut consumer: Consumer<u8>, device_id: &str) ->
             audio_client.Initialize(
                 AUDCLNT_SHAREMODE_SHARED,
                 windows::Win32::Media::Audio::AUDCLNT_STREAMFLAGS_NOPERSIST,
-                10_000_000,
+                200_000,
                 0,
                 mix_format,
                 None,

@@ -131,6 +131,10 @@ impl EngineController {
         self.state = EngineState::Stopped;
     }
 
+    pub fn get_peaks(&self) -> HashMap<String, f32> {
+        self.router.as_ref().map(|r| r.get_peaks()).unwrap_or_default()
+    }
+
     /// Rebuild and (re)start the audio router based on current edges.
     fn apply_routing(&mut self) {
         // Stop existing router

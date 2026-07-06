@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::Mutex;
 
 use engine::{AudioDeviceInfo, EngineController, EngineSnapshot};
@@ -63,6 +64,12 @@ fn refresh_audio_devices(state: State<'_, AppState>) -> RouteGraph {
 }
 
 #[tauri::command]
+fn get_peaks(state: State<'_, AppState>) -> HashMap<String, f32> {
+    let engine = state.engine.lock().expect("engine mutex poisoned");
+    engine.get_peaks()
+}
+
+#[tauri::command]
 fn stop_engine(state: State<'_, AppState>) {
     let mut engine = state.engine.lock().expect("engine mutex poisoned");
     engine.stop_engine();
@@ -82,6 +89,7 @@ pub fn run() {
             remove_route,
             set_volume,
             get_engine_snapshot,
+            get_peaks,
             refresh_audio_devices,
             stop_engine,
         ])

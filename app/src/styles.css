@@ -201,7 +201,7 @@ body {
 
 /* Volume */
 .vol-wrap {
-  height: 18px;
+  height: 20px;
   position: relative;
   display: flex;
   align-items: center;
@@ -212,16 +212,17 @@ body {
   top: 50%;
   transform: translateY(-50%);
   height: 3px;
-  background: #1d6cb0;
+  background: #22d3ee;
   border-radius: 2px;
   pointer-events: none;
-  transition: width 0.08s linear;
+  z-index: 0;
+  transition: width 0.05s linear;
 }
 .vol-slider {
   width: 100%;
   height: 3px;
   appearance: none;
-  background: #2a3344;
+  background: rgba(42, 51, 68, 0.6);
   border-radius: 2px;
   outline: none;
   cursor: pointer;
@@ -236,6 +237,8 @@ body {
   background: #e2e8f0;
   border: 2px solid #475569;
   cursor: pointer;
+  position: relative;
+  z-index: 2;
 }
 
 /* SVG */

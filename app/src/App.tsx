@@ -52,6 +52,19 @@ function App() {
   }, []);
 
   useEffect(() => { loadData(); }, [loadData]);
+
+  // Poll peaks from engine at ~30Hz
+  const [peaks, setPeaks] = useState<Record<string, number>>({});
+  useEffect(() => {
+    const interval = setInterval(async () => {
+      try {
+        const p = await invoke<Record<string, number>>('get_peaks');
+        setPeaks(p);
+      } catch { /* ignore if engine not running */ }
+    }, 33);
+    return () => clearInterval(interval);
+  }, []);
+
   useLayoutEffect(() => {
     const id = requestAnimationFrame(() => setTick((t) => t + 1));
     return () => cancelAnimationFrame(id);
@@ -70,6 +83,12 @@ function App() {
   const setVol = (key: string, v: number) => {
     setVolumes((p) => ({ ...p, [key]: v }));
     invoke('set_volume', { key, gain: v / 100 });
+  };
+
+  // Peak for a node (node id is "device-{wasapi_id}")
+  const getPeak = (nodeId: string): number => {
+    const devId = nodeId.startsWith('device-') ? nodeId.slice(7) : nodeId;
+    return (peaks[devId] ?? 0) * 100;
   };
 
   // Dot positions
@@ -216,7 +235,7 @@ function App() {
                       <div className="conn-info">
                         <span className="conn-name">{tgt?.name}</span>
                         <div className="vol-wrap">
-                          <div className="vol-meter" style={{ width: `${Math.random() * 50 + 10}%` }} />
+                          <div className="vol-meter" style={{ width: `${getPeak(node.id)}%` }} />
                           <input type="range" min={0} max={100} value={vol(k)} onChange={(e) => setVol(k, +e.target.value)} className="vol-slider" />
                         </div>
                       </div>
@@ -263,7 +282,9 @@ function App() {
                     <button className="card-rm" onClick={() => removeOutput(node.id)}>×</button>
                   </div>
                   <div className="vol-wrap">
-                    <div className="vol-meter" style={{ width: `${Math.random() * 50 + 10}%` }} />
+                    <div className="vol-meter" style={{ width: `${
+                      Math.max(0, ...(graph?.edges.filter((e) => e.targetId === node.id).map((e) => getPeak(e.sourceId)) ?? [0]))
+                    }%` }} />
                     <input type="range" min={0} max={100} value={vol(k)} onChange={(e) => setVol(k, +e.target.value)} className="vol-slider" />
                   </div>
                 </div>
