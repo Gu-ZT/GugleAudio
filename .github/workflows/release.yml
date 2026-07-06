@@ -1,0 +1,150 @@
+name: Release
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "app/**"
+      - "crates/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/release.yml"
+  release:
+    types: [published]
+
+permissions:
+  contents: write
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      release_id: ${{ steps.info.outputs.release_id }}
+      tag: ${{ steps.info.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve release
+        id: info
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if [ "${{ github.event_name }}" = "release" ]; then
+            echo "tag=${{ github.event.release.tag_name }}" >> "$GITHUB_OUTPUT"
+            echo "release_id=${{ github.event.release.id }}" >> "$GITHUB_OUTPUT"
+          else
+            VERSION=$(node -p "require('./app/src-tauri/tauri.conf.json').version")
+            TAG="${VERSION}+build.${{ github.run_number }}"
+            RELEASE_ID=$(gh api "repos/${{ github.repository }}/releases" \
+              -f tag_name="$TAG" \
+              -f target_commitish="${{ github.sha }}" \
+              -f name="$TAG" \
+              -F prerelease=true \
+              -F generate_release_notes=true \
+              --jq .id)
+            echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+            echo "release_id=$RELEASE_ID" >> "$GITHUB_OUTPUT"
+          fi
+
+  build:
+    needs: prepare
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            args: --target x86_64-pc-windows-msvc
+          - os: windows-latest
+            target: aarch64-pc-windows-msvc
+            args: --target aarch64-pc-windows-msvc --bundles nsis
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set app version from tag
+        if: github.event_name == 'release'
+        shell: bash
+        env:
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          VERSION="${TAG#v}" node -e "
+            const fs = require('fs');
+            const p = 'app/src-tauri/tauri.conf.json';
+            const c = JSON.parse(fs.readFileSync(p, 'utf8'));
+            c.version = process.env.VERSION;
+            fs.writeFileSync(p, JSON.stringify(c, null, 2));
+          "
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: app/src-tauri
+          key: ${{ matrix.target }}
+
+      - run: npm ci
+        working-directory: app
+
+      - uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          projectPath: app
+          releaseId: ${{ needs.prepare.outputs.release_id }}
+          args: ${{ matrix.args }}
+
+  update-release-notes:
+    needs: [prepare, build]
+    if: ${{ !cancelled() && needs.prepare.result == 'success' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Append download table to release notes
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_ID: ${{ needs.prepare.outputs.release_id }}
+          REPO: ${{ github.repository }}
+        run: |
+          gh api "repos/$REPO/releases/$RELEASE_ID" > release.json
+          node <<'EOF'
+          const fs = require("fs");
+          const rel = JSON.parse(fs.readFileSync("release.json", "utf8"));
+
+          const rules = [
+            [/_x64-setup\.exe$/,      "Windows", "x86_64", "NSIS 安装包"],
+            [/_arm64-setup\.exe$/,    "Windows", "arm64",  "NSIS 安装包"],
+            [/_x64[^/]*\.msi$/,       "Windows", "x86_64", "MSI 安装包"],
+          ];
+
+          const rows = rel.assets
+            .map((a) => {
+              const i = rules.findIndex(([re]) => re.test(a.name));
+              const [, os, arch, kind] = i === -1 ? [null, "其他", "-", "-"] : rules[i];
+              return { order: i === -1 ? rules.length : i, os, arch, kind, a };
+            })
+            .sort((x, y) => x.order - y.order)
+            .map((r) => `| ${r.os} | ${r.arch} | ${r.kind} | [${r.a.name}](${r.a.browser_download_url}) |`);
+
+          const marker = "## 下载";
+          const table = [
+            marker, "",
+            "| 平台 | 架构 | 格式 | 下载 |",
+            "| --- | --- | --- | --- |",
+            ...rows,
+          ].join("\n");
+
+          let body = rel.body ?? "";
+          const idx = body.indexOf(marker);
+          if (idx !== -1) body = body.slice(0, idx).trimEnd();
+          body = (body ? body + "\n\n" : "") + table + "\n";
+          fs.writeFileSync("body.md", body);
+          EOF
+          gh api -X PATCH "repos/$REPO/releases/$RELEASE_ID" -F body=@body.md
