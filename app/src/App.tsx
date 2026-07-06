@@ -238,7 +238,7 @@ function App() {
           })}
         </div>
 
-        <svg className="svg-layer">{renderSvg()}</svg>
+        <svg className={`svg-layer ${dragging ? 'dragging' : ''}`}>{renderSvg()}</svg>
 
         {/* RIGHT: Outputs */}
         <div className="panel right">

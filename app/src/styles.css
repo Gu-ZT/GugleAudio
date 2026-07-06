@@ -250,3 +250,4 @@ body {
 }
 .svg-layer g { pointer-events: auto; }
 .svg-layer g:hover path { stroke-width: 5; }
+.svg-layer.dragging g { pointer-events: none; }
