@@ -73,7 +73,7 @@ function App() {
     const containerRect = container.getBoundingClientRect();
     return {
       x: elRect.left + elRect.width / 2 - containerRect.left,
-      y: elRect.top + elRect.height / 2 - containerRect.top,
+      y: elRect.top + elRect.height / 2 - containerRect.top + container.scrollTop,
     };
   };
 
@@ -104,7 +104,7 @@ function App() {
     setDragging({
       ...dragging,
       currentX: e.clientX - rect.left,
-      currentY: e.clientY - rect.top,
+      currentY: e.clientY - rect.top + containerRef.current.scrollTop,
     });
   };
 
@@ -189,7 +189,6 @@ function App() {
   return (
     <div
       className="app-container"
-      ref={containerRef}
       onMouseMove={onMouseMove}
       onMouseUp={onMouseUp}
     >
@@ -204,7 +203,7 @@ function App() {
       {statusMessage && <div className="status-bar">{statusMessage}</div>}
 
       {/* Main content */}
-      <div className="panels-container">
+      <div className="panels-container" ref={containerRef}>
         {/* Left panel - Outputs (sources) */}
         <div className="panel panel-left">
           <div className="panel-header">
