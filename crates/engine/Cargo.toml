@@ -7,3 +7,4 @@ edition = "2024"
 anyhow = { workspace = true }
 proto = { path = "../proto" }
 serde = { workspace = true }
+windows = { workspace = true }

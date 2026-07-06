@@ -17,10 +17,18 @@ type RouteGraph = {
   edges: { source_id: string; target_id: string }[];
 };
 
+type AudioDeviceInfo = {
+  id: string;
+  name: string;
+  flow: string;
+  role: string;
+};
+
 type EngineSnapshot = {
   state: EngineState;
   active_session: string | null;
   processed_frames: number;
+  default_render_device: AudioDeviceInfo | null;
 };
 
 type ValidationError = {
@@ -42,6 +50,7 @@ function App() {
   const [targetId, setTargetId] = useState('');
   const [validationMessage, setValidationMessage] = useState('');
   const [validationError, setValidationError] = useState<ValidationError | null>(null);
+  const [deviceRefreshMessage, setDeviceRefreshMessage] = useState('');
 
   useEffect(() => {
     const load = async () => {
@@ -104,12 +113,18 @@ function App() {
     setEngine(snapshot);
   };
 
+  const refreshDevices = async () => {
+    const device = await invoke<AudioDeviceInfo | null>('refresh_audio_devices');
+    setEngine((current) => current ? { ...current, default_render_device: device } : current);
+    setDeviceRefreshMessage(device ? 'Default render device refreshed.' : 'No default render device found.');
+  };
+
   return (
     <main style={{ padding: 24, display: 'grid', gap: 20 }}>
       <header>
         <h1 style={{ margin: 0 }}>GugleAudio</h1>
         <p style={{ color: '#9ba7b4' }}>
-          First vertical slice: route graph, network-node constraint, and engine shell.
+          First vertical slice: route graph, network-node constraint, engine shell, and default device discovery.
         </p>
       </header>
 
@@ -142,10 +157,18 @@ function App() {
             <p>Status: <strong>{engine?.state ?? 'loading'}</strong></p>
             <p>Session: <strong>{engine?.active_session ?? 'none'}</strong></p>
             <p>Processed frames: <strong>{engine?.processed_frames ?? 0}</strong></p>
-            <div style={{ display: 'flex', gap: 12 }}>
+            <p>
+              Default render device:{' '}
+              <strong>{engine?.default_render_device?.name ?? 'not detected'}</strong>
+            </p>
+            <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap' }}>
               <button onClick={startEngine}>Start</button>
               <button onClick={stopEngine}>Stop</button>
+              <button onClick={refreshDevices}>Refresh Devices</button>
             </div>
+            {deviceRefreshMessage && (
+              <p style={{ color: '#9ba7b4', marginBottom: 0 }}>{deviceRefreshMessage}</p>
+            )}
           </div>
 
           <div style={panelStyle}>

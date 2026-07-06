@@ -1,6 +1,6 @@
 use std::sync::Mutex;
 
-use engine::{EngineController, EngineSnapshot};
+use engine::{AudioDeviceInfo, EngineController, EngineSnapshot};
 use proto::{sample_graph, RouteEdge, RouteGraph, RouteValidationError};
 use tauri::State;
 
@@ -42,6 +42,13 @@ fn get_engine_snapshot(state: State<'_, AppState>) -> Result<EngineSnapshot, Str
     Ok(engine.snapshot())
 }
 
+#[tauri::command]
+fn refresh_audio_devices(state: State<'_, AppState>) -> Result<Option<AudioDeviceInfo>, String> {
+    let mut engine = state.engine.lock().map_err(|_| "engine mutex poisoned".to_string())?;
+    engine.refresh_audio_devices();
+    Ok(engine.snapshot().default_render_device)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -54,6 +61,7 @@ pub fn run() {
             start_engine,
             stop_engine,
             get_engine_snapshot,
+            refresh_audio_devices,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
