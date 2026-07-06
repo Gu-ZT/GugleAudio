@@ -64,6 +64,12 @@ fn refresh_audio_devices(state: State<'_, AppState>) -> RouteGraph {
 }
 
 #[tauri::command]
+fn set_monitored_inputs(state: State<'_, AppState>, node_ids: Vec<String>) {
+    let mut engine = state.engine.lock().expect("engine mutex poisoned");
+    engine.set_monitored_inputs(node_ids);
+}
+
+#[tauri::command]
 fn get_peaks(state: State<'_, AppState>) -> HashMap<String, f32> {
     let engine = state.engine.lock().expect("engine mutex poisoned");
     engine.get_peaks()
@@ -88,6 +94,7 @@ pub fn run() {
             add_route,
             remove_route,
             set_volume,
+            set_monitored_inputs,
             get_engine_snapshot,
             get_peaks,
             refresh_audio_devices,

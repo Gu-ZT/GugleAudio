@@ -53,6 +53,13 @@ function App() {
 
   useEffect(() => { loadData(); }, [loadData]);
 
+  // Sync monitored inputs to backend whenever active inputs change
+  useEffect(() => {
+    if (activeInputs.length > 0) {
+      invoke('set_monitored_inputs', { nodeIds: activeInputs });
+    }
+  }, [activeInputs]);
+
   // Poll peaks from engine at ~30Hz
   const [peaks, setPeaks] = useState<Record<string, number>>({});
   useEffect(() => {

@@ -1,7 +1,9 @@
+pub mod meter;
 pub mod router;
 
 use anyhow::{Context, Result};
 use proto::{NodeDirection, RouteEdge, RouteGraph, RouteNode, RouteValidationError, TransportKind};
+use meter::MeterEngine;
 use router::{ActiveRoute, AudioRouter};
 use serde::Serialize;
 use std::collections::HashMap;
@@ -43,8 +45,9 @@ pub struct EngineController {
     state: EngineState,
     all_devices: Vec<AudioDeviceInfo>,
     router: Option<AudioRouter>,
-    volumes: HashMap<String, f32>,       // edge key "src>tgt" -> gain 0.0..1.0
-    output_volumes: HashMap<String, f32>, // device id -> gain
+    meter: Option<MeterEngine>,
+    volumes: HashMap<String, f32>,
+    output_volumes: HashMap<String, f32>,
 }
 
 impl EngineController {
@@ -57,6 +60,7 @@ impl EngineController {
             state: EngineState::Stopped,
             all_devices,
             router: None,
+            meter: None,
             volumes: HashMap::new(),
             output_volumes: HashMap::new(),
         }
@@ -132,7 +136,41 @@ impl EngineController {
     }
 
     pub fn get_peaks(&self) -> HashMap<String, f32> {
-        self.router.as_ref().map(|r| r.get_peaks()).unwrap_or_default()
+        let mut result = self.meter.as_ref().map(|m| m.get_peaks()).unwrap_or_default();
+        // Merge router peaks (override meter if router is running for same device)
+        if let Some(router) = &self.router {
+            for (k, v) in router.get_peaks() {
+                result.insert(k, v);
+            }
+        }
+        result
+    }
+
+    /// Set which input devices should be monitored for peak metering.
+    /// This starts/restarts a lightweight capture-only engine for those devices.
+    pub fn set_monitored_inputs(&mut self, node_ids: Vec<String>) {
+        // Stop existing meter
+        if let Some(meter) = self.meter.take() {
+            meter.stop();
+        }
+
+        if node_ids.is_empty() {
+            return;
+        }
+
+        let device_ids: Vec<(String, bool)> = node_ids
+            .iter()
+            .filter_map(|nid| {
+                let dev_id = self.node_to_device_id(nid)?;
+                let is_capture = self.all_devices.iter().any(|d| d.id == dev_id && d.flow == "capture");
+                Some((dev_id, !is_capture))
+            })
+            .collect();
+
+        match MeterEngine::start(device_ids) {
+            Ok(m) => { self.meter = Some(m); }
+            Err(e) => { eprintln!("[engine] failed to start meter: {e:#}"); }
+        }
     }
 
     /// Rebuild and (re)start the audio router based on current edges.
@@ -334,6 +372,7 @@ mod tests {
             state: EngineState::Stopped,
             all_devices: vec![],
             router: None,
+            meter: None,
             volumes: HashMap::new(),
             output_volumes: HashMap::new(),
         };
@@ -349,6 +388,7 @@ mod tests {
             state: EngineState::Stopped,
             all_devices: vec![],
             router: None,
+            meter: None,
             volumes: HashMap::new(),
             output_volumes: HashMap::new(),
         };
