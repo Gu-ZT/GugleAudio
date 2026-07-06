@@ -210,11 +210,7 @@ impl Default for EngineController {
 
 fn enumerate_all_devices() -> Result<Vec<AudioDeviceInfo>> {
     unsafe {
-        let hr = CoInitializeEx(None, COINIT_MULTITHREADED);
-        // S_OK or S_FALSE (already initialized) are both fine
-        if hr.is_err() {
-            hr.ok().context("CoInitializeEx failed")?;
-        }
+        let needs_uninit = com_init_best_effort();
 
         let result = (|| {
             let enumerator: IMMDeviceEnumerator =
@@ -226,8 +222,26 @@ fn enumerate_all_devices() -> Result<Vec<AudioDeviceInfo>> {
             Ok(devices)
         })();
 
-        CoUninitialize();
+        if needs_uninit {
+            CoUninitialize();
+        }
         result
+    }
+}
+
+/// Try to initialize COM. Returns true if we should call CoUninitialize later.
+/// Handles the case where COM is already initialized (S_FALSE or RPC_E_CHANGED_MODE).
+fn com_init_best_effort() -> bool {
+    unsafe {
+        let hr = CoInitializeEx(None, COINIT_MULTITHREADED);
+        match hr {
+            r if r.is_ok() => true,   // We initialized it, must uninit
+            _ => {
+                // S_FALSE (already init same mode) or RPC_E_CHANGED_MODE (STA thread)
+                // Either way COM is usable, just don't uninit
+                false
+            }
+        }
     }
 }
 
