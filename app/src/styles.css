@@ -1,240 +1,215 @@
 body {
   margin: 0;
   font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-  background: #0d0f14;
-  color: #f4f7fb;
+  background: #111318;
+  color: #e8ecf2;
   overflow: hidden;
   user-select: none;
 }
+* { box-sizing: border-box; }
 
-* {
-  box-sizing: border-box;
-}
-
-button, select {
-  font: inherit;
-}
-
-.app-container {
+.app-root {
   width: 100vw;
   height: 100vh;
   display: flex;
   flex-direction: column;
-  position: relative;
 }
 
 /* Header */
-.app-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 14px 24px;
+.hdr {
+  padding: 12px 20px;
   border-bottom: 1px solid #1e2433;
-  background: #0d0f14;
+  background: #111318;
   z-index: 10;
 }
-
-.app-title {
+.hdr-title {
   margin: 0;
-  font-size: 20px;
+  font-size: 18px;
   font-weight: 700;
-  letter-spacing: -0.5px;
   background: linear-gradient(135deg, #a78bfa, #06b6d4);
   -webkit-background-clip: text;
   -webkit-text-fill-color: transparent;
 }
 
-.header-actions {
-  display: flex;
-  gap: 10px;
-}
-
-.btn-refresh {
-  padding: 6px 16px;
-  border-radius: 6px;
-  border: 1px solid #2a3344;
-  background: #161b26;
-  color: #cbd5e1;
-  cursor: pointer;
-  font-size: 13px;
-  transition: background 0.15s;
-}
-.btn-refresh:hover {
-  background: #1e2636;
-}
-
-/* Status */
-.status-bar {
-  padding: 8px 24px;
+/* Toast */
+.toast {
+  padding: 6px 20px;
   background: #7c2d12;
   color: #fef2f2;
-  font-size: 13px;
+  font-size: 12px;
+  cursor: pointer;
   z-index: 10;
 }
 
 /* Panels */
-.panels-container {
+.panels {
   flex: 1;
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: 0;
-  padding: 20px;
+  padding: 16px 12px;
   position: relative;
   overflow-y: auto;
   overflow-x: hidden;
 }
-
 .panel {
   display: flex;
   flex-direction: column;
-  gap: 0;
+  gap: 8px;
 }
+.panel.left { padding-right: 50px; }
+.panel.right { padding-left: 50px; }
 
-.panel-left {
-  padding-right: 60px;
-}
-
-.panel-right {
-  padding-left: 60px;
-}
-
-.panel-header {
-  padding: 10px 16px;
+/* Add device select */
+.add-select {
+  width: 100%;
+  padding: 10px 14px;
+  border-radius: 8px;
+  border: 1px solid #2a3344;
+  background: #1a1f2a;
+  color: #cbd5e1;
   font-size: 13px;
-  font-weight: 600;
-  color: #64748b;
-  text-transform: uppercase;
-  letter-spacing: 0.5px;
+  cursor: pointer;
+  appearance: none;
 }
+.add-select:focus { outline: 1px solid #475569; }
 
-/* Device list */
-.device-list {
+/* Card */
+.card {
+  background: #1a1f2a;
+  border: 1px solid #252d3a;
+  border-radius: 10px;
+  padding: 12px 14px;
   display: flex;
   flex-direction: column;
-  gap: 4px;
-}
-
-/* Device card */
-.device-card {
-  background: #161b26;
-  border: 1px solid #1e2a3a;
-  border-radius: 12px;
-  padding: 14px 16px;
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  transition: border-color 0.15s, background 0.15s;
+  gap: 8px;
   position: relative;
 }
-.device-card:hover {
-  border-color: #2d3a4f;
-  background: #1a2030;
-}
+.card:hover { border-color: #334155; }
 
-.device-info {
+.card-top {
   display: flex;
   align-items: center;
-  gap: 10px;
-  flex: 1;
-  min-width: 0;
+  justify-content: space-between;
+  gap: 8px;
 }
-
-.device-icon {
-  font-size: 18px;
-  flex-shrink: 0;
-}
-
-.device-text {
-  min-width: 0;
-}
-
-.device-name {
-  font-size: 14px;
+.card-name {
+  font-size: 13px;
   font-weight: 600;
-  color: #e2e8f0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.card-rm {
+  background: none;
+  border: none;
+  color: #64748b;
+  font-size: 18px;
+  cursor: pointer;
+  padding: 0 4px;
+  line-height: 1;
+}
+.card-rm:hover { color: #f43f5e; }
+
+/* Sub-row (per-connection volume in input card) */
+.sub-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 0;
+  border-top: 1px solid #1e2838;
+}
+.sub-name {
+  font-size: 11px;
+  color: #94a3b8;
+  min-width: 60px;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
 
-.device-sub {
-  font-size: 11px;
-  color: #64748b;
-  margin-top: 1px;
-}
-
-/* Controls & volume */
-.device-controls {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  margin-left: auto;
-}
-
-.device-controls-left {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  margin-right: 8px;
-}
-
-.volume-bar {
-  width: 80px;
-  height: 4px;
-  background: #1e6cb0;
-  border-radius: 2px;
+/* Volume */
+.vol-wrap {
+  flex: 1;
+  height: 20px;
   position: relative;
+  display: flex;
+  align-items: center;
+}
+.vol-meter {
+  position: absolute;
+  left: 0;
+  top: 50%;
+  transform: translateY(-50%);
+  height: 4px;
+  background: #1d6cb0;
+  border-radius: 2px;
+  pointer-events: none;
+  transition: width 0.1s;
+}
+.vol-slider {
+  width: 100%;
+  height: 4px;
+  appearance: none;
+  background: #2a3344;
+  border-radius: 2px;
+  outline: none;
+  cursor: pointer;
+  position: relative;
+  z-index: 1;
+}
+.vol-slider::-webkit-slider-thumb {
+  appearance: none;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: #e2e8f0;
+  border: 2px solid #475569;
+  cursor: pointer;
 }
 
-/* Connection dots */
-.connection-dot {
+.output-volume { margin-top: 4px; }
+
+/* Dots */
+.dot-row {
+  display: flex;
+  justify-content: flex-end;
+  padding-top: 4px;
+}
+.dot-row.right { justify-content: flex-end; }
+.dot-row.left-dot { justify-content: flex-start; }
+
+.dot {
   width: 14px;
   height: 14px;
   border-radius: 50%;
   border: 2px solid #475569;
   background: #1e293b;
   cursor: crosshair;
-  transition: border-color 0.15s, transform 0.15s, background 0.15s;
+  transition: transform 0.12s, border-color 0.12s;
   flex-shrink: 0;
 }
-.connection-dot:hover {
+.dot:hover {
   border-color: #a78bfa;
-  background: #312e81;
-  transform: scale(1.3);
+  transform: scale(1.4);
 }
 
-.dot-output {
-  position: relative;
+/* Output card layout */
+.out-card {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
 }
 
-.dot-input {
-  position: relative;
-}
-
-/* SVG connections overlay */
-.connections-svg {
+/* SVG */
+.svg-layer {
   position: absolute;
-  top: 0;
-  left: 0;
+  inset: 0;
   width: 100%;
   height: 100%;
-  min-height: 100%;
   pointer-events: none;
   z-index: 5;
   overflow: visible;
 }
-.connections-svg g {
-  pointer-events: auto;
-}
-.connections-svg g:hover path {
-  stroke-width: 5;
-  opacity: 1;
-}
-
-/* Panel-right cards: flip layout */
-.panel-right .device-card {
-  flex-direction: row;
-}
-.panel-right .device-info {
-  flex-direction: row;
-}
+.svg-layer g { pointer-events: auto; }
+.svg-layer g:hover path { stroke-width: 5; }

@@ -17,252 +17,222 @@ type RouteGraph = {
   edges: { sourceId: string; targetId: string }[];
 };
 
-const CONNECTION_COLORS = [
-  '#a78bfa', // purple
-  '#f97316', // orange
-  '#06b6d4', // cyan
-  '#f43f5e', // rose
-  '#22c55e', // green
-  '#eab308', // yellow
-  '#3b82f6', // blue
-  '#ec4899', // pink
-];
+type AudioDeviceInfo = {
+  id: string;
+  name: string;
+  flow: string;
+  role: string;
+};
 
-function getConnectionColor(index: number): string {
-  return CONNECTION_COLORS[index % CONNECTION_COLORS.length];
-}
+const COLORS = [
+  '#a78bfa', '#f97316', '#06b6d4', '#f43f5e',
+  '#22c55e', '#eab308', '#3b82f6', '#ec4899',
+];
 
 function App() {
   const [graph, setGraph] = useState<RouteGraph | null>(null);
-  const [dragging, setDragging] = useState<{
-    sourceId: string;
-    startX: number;
-    startY: number;
-    currentX: number;
-    currentY: number;
-  } | null>(null);
+  const [allDevices, setAllDevices] = useState<AudioDeviceInfo[]>([]);
+  const [activeInputs, setActiveInputs] = useState<string[]>([]);
+  const [activeOutputs, setActiveOutputs] = useState<string[]>([]);
+  const [volumes, setVolumes] = useState<Record<string, number>>({});
   const [statusMessage, setStatusMessage] = useState('');
-  const [, setRenderTick] = useState(0);
-  const containerRef = useRef<HTMLDivElement>(null);
+  const [, setTick] = useState(0);
+  const [dragging, setDragging] = useState<{
+    sourceId: string; startX: number; startY: number; curX: number; curY: number;
+  } | null>(null);
+  const panelsRef = useRef<HTMLDivElement>(null);
 
-  const loadGraph = useCallback(async () => {
-    const g = await invoke<RouteGraph>('get_route_graph');
+  const loadData = useCallback(async () => {
+    const [g, devices] = await Promise.all([
+      invoke<RouteGraph>('get_route_graph'),
+      invoke<AudioDeviceInfo[]>('get_audio_devices'),
+    ]);
     setGraph(g);
+    setAllDevices(devices);
   }, []);
 
-  useEffect(() => { loadGraph(); }, [loadGraph]);
-
-  // Force re-render after layout so SVG positions are correct
+  useEffect(() => { loadData(); }, [loadData]);
   useLayoutEffect(() => {
-    const id = requestAnimationFrame(() => setRenderTick((t) => t + 1));
+    const id = requestAnimationFrame(() => setTick((t) => t + 1));
     return () => cancelAnimationFrame(id);
-  }, [graph]);
+  }, [graph, activeInputs, activeOutputs]);
 
-  const outputs = graph?.nodes.filter((n) => n.direction === 'output') ?? [];
-  const inputs = graph?.nodes.filter((n) => n.direction === 'input') ?? [];
+  // Nodes
+  const inputNodes = graph?.nodes.filter((n) => n.direction === 'output') ?? [];
+  const outputNodes = graph?.nodes.filter((n) => n.direction === 'input') ?? [];
+  const activeInNodes = inputNodes.filter((n) => activeInputs.includes(n.id));
+  const activeOutNodes = outputNodes.filter((n) => activeOutputs.includes(n.id));
+  const availInputs = inputNodes.filter((n) => !activeInputs.includes(n.id));
+  const availOutputs = outputNodes.filter((n) => !activeOutputs.includes(n.id));
 
-  // --- Connection point positions ---
-  const getOutputDotId = (nodeId: string) => `dot-out-${nodeId}`;
-  const getInputDotId = (nodeId: string) => `dot-in-${nodeId}`;
+  // Volume helpers
+  const vol = (key: string) => volumes[key] ?? 100;
+  const setVol = (key: string, v: number) => setVolumes((p) => ({ ...p, [key]: v }));
 
-  const getDotCenter = (dotId: string): { x: number; y: number } | null => {
+  // Dot positions
+  const dotPos = (dotId: string) => {
     const el = document.getElementById(dotId);
-    const container = containerRef.current;
-    if (!el || !container) return null;
-    const elRect = el.getBoundingClientRect();
-    const containerRect = container.getBoundingClientRect();
-    return {
-      x: elRect.left + elRect.width / 2 - containerRect.left,
-      y: elRect.top + elRect.height / 2 - containerRect.top + container.scrollTop,
-    };
+    const c = panelsRef.current;
+    if (!el || !c) return null;
+    const er = el.getBoundingClientRect();
+    const cr = c.getBoundingClientRect();
+    return { x: er.left + er.width / 2 - cr.left, y: er.top + er.height / 2 - cr.top + c.scrollTop };
   };
 
-  const isNetworkNode = (id: string) => {
-    return graph?.nodes.find((n) => n.id === id)?.transport === 'network';
-  };
-
-  // --- Drag to connect ---
-  const onDotMouseDown = (e: React.MouseEvent, sourceId: string) => {
+  // Drag
+  const startDrag = (e: React.MouseEvent, sourceId: string) => {
     e.preventDefault();
-    const container = containerRef.current;
-    if (!container) return;
-    const rect = container.getBoundingClientRect();
-    const dot = getDotCenter(getOutputDotId(sourceId));
-    if (!dot) return;
-    setDragging({
-      sourceId,
-      startX: dot.x,
-      startY: dot.y,
-      currentX: e.clientX - rect.left,
-      currentY: e.clientY - rect.top,
-    });
+    const c = panelsRef.current;
+    if (!c) return;
+    const cr = c.getBoundingClientRect();
+    const d = dotPos(`dot-out-${sourceId}`);
+    if (!d) return;
+    setDragging({ sourceId, startX: d.x, startY: d.y, curX: e.clientX - cr.left, curY: e.clientY - cr.top + c.scrollTop });
   };
-
-  const onMouseMove = (e: React.MouseEvent) => {
-    if (!dragging || !containerRef.current) return;
-    const rect = containerRef.current.getBoundingClientRect();
-    setDragging({
-      ...dragging,
-      currentX: e.clientX - rect.left,
-      currentY: e.clientY - rect.top + containerRef.current.scrollTop,
-    });
+  const onMove = (e: React.MouseEvent) => {
+    if (!dragging || !panelsRef.current) return;
+    const cr = panelsRef.current.getBoundingClientRect();
+    setDragging({ ...dragging, curX: e.clientX - cr.left, curY: e.clientY - cr.top + panelsRef.current.scrollTop });
   };
-
-  const onMouseUp = async (e: React.MouseEvent) => {
+  const onUp = async (e: React.MouseEvent) => {
     if (!dragging) return;
-    const target = (e.target as HTMLElement).closest('[data-input-id]');
-    const targetId = target?.getAttribute('data-input-id');
-
-    if (targetId) {
-      if (isNetworkNode(dragging.sourceId) && isNetworkNode(targetId)) {
-        setStatusMessage('Network nodes cannot connect to each other.');
+    const el = (e.target as HTMLElement).closest('[data-input-id]');
+    const tid = el?.getAttribute('data-input-id');
+    if (tid) {
+      const srcNet = graph?.nodes.find((n) => n.id === dragging.sourceId)?.transport === 'network';
+      const tgtNet = graph?.nodes.find((n) => n.id === tid)?.transport === 'network';
+      if (srcNet && tgtNet) {
+        setStatusMessage('Network → Network forbidden');
       } else {
         try {
-          const g = await invoke<RouteGraph>('add_route', {
-            edge: { sourceId: dragging.sourceId, targetId },
-          });
+          const g = await invoke<RouteGraph>('add_route', { edge: { sourceId: dragging.sourceId, targetId: tid } });
           setGraph(g);
           setStatusMessage('');
-        } catch (err) {
-          setStatusMessage(String(err));
-        }
+        } catch (err) { setStatusMessage(String(err)); }
       }
     }
     setDragging(null);
   };
 
-  const removeEdge = async (sourceId: string, targetId: string) => {
-    const g = await invoke<RouteGraph>('remove_route', { sourceId, targetId });
+  const delEdge = async (s: string, t: string) => {
+    const g = await invoke<RouteGraph>('remove_route', { sourceId: s, targetId: t });
     setGraph(g);
   };
 
-  const refreshDevices = async () => {
-    const g = await invoke<RouteGraph>('refresh_audio_devices');
-    setGraph(g);
-    setStatusMessage('Devices refreshed.');
-    setTimeout(() => setStatusMessage(''), 2000);
+  const addInput = (id: string) => setActiveInputs((p) => [...p, id]);
+  const addOutput = (id: string) => setActiveOutputs((p) => [...p, id]);
+  const removeInput = async (id: string) => {
+    setActiveInputs((p) => p.filter((x) => x !== id));
+    const edges = graph?.edges.filter((e) => e.sourceId === id) ?? [];
+    for (const e of edges) await invoke('remove_route', { sourceId: e.sourceId, targetId: e.targetId });
+    loadData();
+  };
+  const removeOutput = async (id: string) => {
+    setActiveOutputs((p) => p.filter((x) => x !== id));
+    const edges = graph?.edges.filter((e) => e.targetId === id) ?? [];
+    for (const e of edges) await invoke('remove_route', { sourceId: e.sourceId, targetId: e.targetId });
+    loadData();
   };
 
-  // --- Render bezier connections ---
-  const renderConnections = () => {
+  // Render SVG
+  const renderSvg = () => {
     if (!graph) return null;
-    const paths: React.ReactNode[] = [];
-
-    graph.edges.forEach((edge, i) => {
-      const start = getDotCenter(getOutputDotId(edge.sourceId));
-      const end = getDotCenter(getInputDotId(edge.targetId));
-      if (!start || !end) return;
-
-      const color = getConnectionColor(i);
-      const cpOffset = Math.abs(end.x - start.x) * 0.4;
-      const d = `M ${start.x} ${start.y} C ${start.x + cpOffset} ${start.y}, ${end.x - cpOffset} ${end.y}, ${end.x} ${end.y}`;
-
-      paths.push(
-        <g key={`edge-${i}`} onClick={() => removeEdge(edge.sourceId, edge.targetId)} style={{ cursor: 'pointer' }}>
-          <path d={d} stroke={color} strokeWidth={3} fill="none" opacity={0.9} />
-          <circle cx={start.x} cy={start.y} r={6} fill={color} />
-          <circle cx={end.x} cy={end.y} r={6} fill={color} />
-        </g>,
+    const els: React.ReactNode[] = [];
+    const visible = graph.edges.filter((e) => activeInputs.includes(e.sourceId) && activeOutputs.includes(e.targetId));
+    visible.forEach((edge, i) => {
+      const s = dotPos(`dot-out-${edge.sourceId}`);
+      const t = dotPos(`dot-in-${edge.targetId}`);
+      if (!s || !t) return;
+      const col = COLORS[i % COLORS.length];
+      const cp = Math.max(80, Math.abs(t.x - s.x) * 0.45);
+      const d = `M${s.x},${s.y} C${s.x + cp},${s.y} ${t.x - cp},${t.y} ${t.x},${t.y}`;
+      els.push(
+        <g key={i} onClick={() => delEdge(edge.sourceId, edge.targetId)} style={{ cursor: 'pointer' }}>
+          <path d={d} stroke={col} strokeWidth={3} fill="none" opacity={0.85} />
+          <circle cx={s.x} cy={s.y} r={6} fill={col} />
+          <circle cx={t.x} cy={t.y} r={6} fill={col} />
+        </g>
       );
     });
-
-    // Dragging preview
     if (dragging) {
-      const cpOffset = Math.abs(dragging.currentX - dragging.startX) * 0.4;
-      const d = `M ${dragging.startX} ${dragging.startY} C ${dragging.startX + cpOffset} ${dragging.startY}, ${dragging.currentX - cpOffset} ${dragging.currentY}, ${dragging.currentX} ${dragging.currentY}`;
-      paths.push(
-        <path key="drag-preview" d={d} stroke="#94a3b8" strokeWidth={2} fill="none" strokeDasharray="6 4" />,
-      );
+      const cp = Math.max(60, Math.abs(dragging.curX - dragging.startX) * 0.4);
+      const d = `M${dragging.startX},${dragging.startY} C${dragging.startX + cp},${dragging.startY} ${dragging.curX - cp},${dragging.curY} ${dragging.curX},${dragging.curY}`;
+      els.push(<path key="preview" d={d} stroke="#64748b" strokeWidth={2} fill="none" strokeDasharray="5 4" />);
     }
-
-    return paths;
-  };
-
-  const transportIcon = (transport: TransportKind) => {
-    switch (transport) {
-      case 'local': return '🎧';
-      case 'virtual': return '🔀';
-      case 'network': return '🌐';
-    }
+    return els;
   };
 
   return (
-    <div
-      className="app-container"
-      onMouseMove={onMouseMove}
-      onMouseUp={onMouseUp}
-    >
-      {/* Header */}
-      <header className="app-header">
-        <h1 className="app-title">GugleAudio</h1>
-        <div className="header-actions">
-          <button className="btn-refresh" onClick={refreshDevices}>Refresh</button>
-        </div>
+    <div className="app-root" onMouseMove={onMove} onMouseUp={onUp}>
+      <header className="hdr">
+        <h1 className="hdr-title">GugleAudio</h1>
       </header>
+      {statusMessage && <div className="toast" onClick={() => setStatusMessage('')}>{statusMessage}</div>}
 
-      {statusMessage && <div className="status-bar">{statusMessage}</div>}
+      <div className="panels" ref={panelsRef}>
+        {/* LEFT */}
+        <div className="panel left">
+          <select className="add-select" value="" onChange={(e) => { if (e.target.value) addInput(e.target.value); }}>
+            <option value="" disabled>Add Input</option>
+            {availInputs.map((n) => <option key={n.id} value={n.id}>{n.name}</option>)}
+          </select>
 
-      {/* Main content */}
-      <div className="panels-container" ref={containerRef}>
-        {/* Left panel - Outputs (sources) */}
-        <div className="panel panel-left">
-          <div className="panel-header">
-            <span>Inputs (Sources)</span>
-          </div>
-          <div className="device-list">
-            {outputs.map((node) => (
-              <div key={node.id} className="device-card">
-                <div className="device-info">
-                  <span className="device-icon">{transportIcon(node.transport)}</span>
-                  <div className="device-text">
-                    <div className="device-name">{node.name}</div>
-                    <div className="device-sub">{node.transport}</div>
-                  </div>
+          {activeInNodes.map((node) => {
+            const conns = graph?.edges.filter((e) => e.sourceId === node.id && activeOutputs.includes(e.targetId)) ?? [];
+            return (
+              <div key={node.id} className="card">
+                <div className="card-top">
+                  <span className="card-name">{node.name}</span>
+                  <button className="card-rm" onClick={() => removeInput(node.id)}>×</button>
                 </div>
-                <div className="device-controls">
-                  <div className="volume-bar" />
-                  <div
-                    className="connection-dot dot-output"
-                    id={getOutputDotId(node.id)}
-                    onMouseDown={(e) => onDotMouseDown(e, node.id)}
-                  />
+                {conns.map((c) => {
+                  const tgt = graph?.nodes.find((n) => n.id === c.targetId);
+                  const k = `${c.sourceId}>${c.targetId}`;
+                  return (
+                    <div key={k} className="sub-row">
+                      <span className="sub-name">{tgt?.name}</span>
+                      <div className="vol-wrap">
+                        <div className="vol-meter" style={{ width: `${Math.random() * 50 + 10}%` }} />
+                        <input type="range" min={0} max={100} value={vol(k)} onChange={(e) => setVol(k, +e.target.value)} className="vol-slider" />
+                      </div>
+                    </div>
+                  );
+                })}
+                <div className="dot-row right">
+                  <div className="dot" id={`dot-out-${node.id}`} onMouseDown={(e) => startDrag(e, node.id)} />
                 </div>
               </div>
-            ))}
-          </div>
+            );
+          })}
         </div>
 
-        {/* SVG overlay for connections */}
-        <svg className="connections-svg">
-          {renderConnections()}
-        </svg>
+        <svg className="svg-layer">{renderSvg()}</svg>
 
-        {/* Right panel - Inputs (sinks) */}
-        <div className="panel panel-right">
-          <div className="panel-header">
-            <span>Outputs (Sinks)</span>
-          </div>
-          <div className="device-list">
-            {inputs.map((node) => (
-              <div key={node.id} className="device-card" data-input-id={node.id}>
-                <div className="device-controls-left">
-                  <div
-                    className="connection-dot dot-input"
-                    id={getInputDotId(node.id)}
-                    data-input-id={node.id}
-                  />
-                  <div className="volume-bar" />
+        {/* RIGHT */}
+        <div className="panel right">
+          <select className="add-select" value="" onChange={(e) => { if (e.target.value) addOutput(e.target.value); }}>
+            <option value="" disabled>Add Output</option>
+            {availOutputs.map((n) => <option key={n.id} value={n.id}>{n.name}</option>)}
+          </select>
+
+          {activeOutNodes.map((node) => {
+            const k = `out-${node.id}`;
+            return (
+              <div key={node.id} className="card out-card" data-input-id={node.id}>
+                <div className="dot-row left-dot">
+                  <div className="dot" id={`dot-in-${node.id}`} data-input-id={node.id} />
                 </div>
-                <div className="device-info">
-                  <span className="device-icon">{transportIcon(node.transport)}</span>
-                  <div className="device-text">
-                    <div className="device-name">{node.name}</div>
-                    <div className="device-sub">{node.transport}</div>
-                  </div>
+                <div className="card-top">
+                  <span className="card-name">{node.name}</span>
+                  <button className="card-rm" onClick={() => removeOutput(node.id)}>×</button>
+                </div>
+                <div className="vol-wrap">
+                  <div className="vol-meter" style={{ width: `${Math.random() * 50 + 10}%` }} />
+                  <input type="range" min={0} max={100} value={vol(k)} onChange={(e) => setVol(k, +e.target.value)} className="vol-slider" />
                 </div>
               </div>
-            ))}
-          </div>
+            );
+          })}
         </div>
       </div>
     </div>
